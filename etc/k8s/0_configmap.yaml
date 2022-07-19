@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cfgmap-ros-translator-0
+  namespace: default
+data:
+  ros-translator-conf: |-
+    {
+    "broker_uri": "amqp://rabbitmq.default",
+    "management_url": "http://guest:guest@10.10.2.30:30080",
+    "translator_id": 0
+    }
+  ros-translator-robots: |-
+    {
+    "robot_0":{
+        "id": 0,
+        "ip": "10.10.1.188",
+        "port": "9090"
+    }
+    }

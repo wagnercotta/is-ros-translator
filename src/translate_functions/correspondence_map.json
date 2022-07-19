@@ -1,0 +1,33 @@
+[
+    {
+        "topic_is":"odometry_filtered",
+        "topic_ros":"/odometry/filtered",
+        "translate_function":"odometry_filtered"
+    },
+    {
+        "topic_is":"move_base",
+        "topic_ros":"/move_base",
+        "translate_function":"move_base"
+    }
+    ,
+    {
+        "topic_is":"move_base_simple_goal",
+        "topic_ros":"/move_base_simple/goal",
+        "translate_function":"move_base_simple_goal"
+    }
+    ,
+    {
+        "topic_is":"odrive_reset_odometry",
+        "topic_ros":"/odrive/reset_odometry",
+        "translate_function":"odrive_reset_odometry"
+    }
+    ,
+    {
+        "topic_is":"dynamic_map",
+        "topic_ros":"/dynamic_map",
+        "translate_function":"dynamic_map"
+    }
+
+]
+
+

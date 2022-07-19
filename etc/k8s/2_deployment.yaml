@@ -1,0 +1,44 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: "ros-translator-0"
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: ros-translator-0
+    spec:
+      dnsPolicy: "ClusterFirstWithHostNet"
+      containers:
+        - name: publisher
+          image: wagnercotta/publisher:v1.0
+          command: ["python3"]
+          args: ["service.py","etc/conf/config.json"]
+          imagePullPolicy: Always
+          resources:
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /opt/ros_translator_publisher/etc/conf/
+        - name: consumer
+          image: wagnercotta/consumer:v1.0
+          command: ["python3"]
+          args: ["service.py","etc/conf/config.json"]
+          imagePullPolicy: Always
+          resources:
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /opt/ros_translator_consumer/etc/conf/
+      volumes:
+        - name: config
+          configMap:
+            name: cfgmap-ros-translator-0
+            items:
+              - key: ros-translator-conf
+                path: config.json
+              - key: ros-translator-robots
+                path: robots.json
