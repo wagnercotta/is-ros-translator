@@ -2,11 +2,11 @@ FROM ros:noetic as build
 ENV PATH="/opt/ros/noetic/bin:$PATH"
 ENV PYTHONPATH="/opt/ros/noetic/lib/python3/dist-packages"
 
-ARG FOLDER
-WORKDIR /opt/ros_translator_$FOLDER
+ARG folder
+WORKDIR /opt/ros_translator_$folder
 
 COPY ./requirements.txt .
-COPY ./src/ros_translator_$FOLDER .
+COPY ./src/ros_translator_$folder .
 COPY ./src/translate_functions ./translate_functions
 
 RUN apt-get update

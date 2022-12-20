@@ -6,8 +6,8 @@ metadata:
 data:
   ros-translator-conf: |-
     {
-    "broker_uri": "amqp://rabbitmq.default",
-    "management_url": "http://guest:guest@10.10.2.30:30080",
+    "broker_uri": "amqp://guest:guest@10.10.2.2:30000",
+    "management_url": "http://guest:guest@10.10.2.2:30080",
     "translator_id": 0
     }
   ros-translator-robots: |-
