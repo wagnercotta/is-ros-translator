@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "is-ros-translator-v2"
+version = "0.5.0"
+description = "PrIS to ROS 1 / ROS 2 interoperability gateway"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE.md"]
+authors = [{name = "is-ros-translator contributors"}]
+dependencies = [
+  "roslibpy>=2.1.0,<3.0",
+  "fastapi>=0.110,<1",
+  "uvicorn>=0.29,<1",
+  "pydantic>=2.0,<3",
+  "PyYAML>=6.0,<7",
+  "is-wire==1.2.1",
+  "is-msgs==1.1.18",
+  "protobuf==3.20.3",
+  # is-wire 1.2.1 imports six.moves but does not ensure six is installed.
+  "six>=1.16,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[project.scripts]
+is-ros-translator = "is_ros_translator_v2.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

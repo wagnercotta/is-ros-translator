@@ -1,0 +1,188 @@
+# Completely self-contained, headless VM E2E: PrIS AMQP -> gateway -> ROS2 -> RViz.
+# RViz uses the SAME network namespace as the ROS2 node, so ROS2 DDS discovery
+# works even on Docker networks with inconsistent multicast forwarding.
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      # Erlang ping may succeed before AMQP port 5672 accepts connections.
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      start_period: 15s
+      interval: 8s
+      timeout: 5s
+      retries: 20
+    networks: [e2elab]
+
+  ros2:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros2/Dockerfile
+    environment:
+      ROS_DOMAIN_ID: "31"
+      ROS_LOCALHOST_ONLY: "0"
+    ipc: shareable   # RViz joins this IPC namespace (ipc: service:ros2).
+    shm_size: 512m  # Shared /dev/shm for RViz, ROS2 DDS and the simulated robot
+    # Network namespace is shared with the RViz container. noVNC listens on
+    # 6080 there, so the port is published on ROS2 instead.
+    ports:
+      - "127.0.0.1:6080:6080"
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 45s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [e2elab]
+    restart: unless-stopped
+
+  ros2b:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros2/Dockerfile
+    environment:
+      ROS_DOMAIN_ID: "32"
+      ROS_LOCALHOST_ONLY: "0"
+    shm_size: 256m
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 45s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [e2elab]
+    restart: unless-stopped
+
+  ros1a:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros1/Dockerfile
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 45s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [e2elab]
+    restart: unless-stopped
+
+  ros1b:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros1/Dockerfile
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 45s
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [e2elab]
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    command: ["is-ros-translator", "--config", "configs/e2e-rviz.yaml"]
+    environment:
+      GATEWAY_API_KEY: local-e2e-api-key
+      ISWIRE_BROKER_URI: amqp://guest:guest@rabbitmq:5672/
+    volumes:
+      - ../../configs/e2e-rviz.yaml:/app/configs/e2e-rviz.yaml:ro
+    ports:
+      # Host-only API port is configurable to avoid conflicts with other labs.
+      # In-container gateway and E2E tester still use port 8080.
+      - "127.0.0.1:18080:8080"
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      ros2: {condition: service_healthy}
+      ros2b: {condition: service_healthy}
+      ros1a: {condition: service_healthy}
+      ros1b: {condition: service_healthy}
+    healthcheck:
+      # /health/ready returns HTTP 200 even when status=degraded; inspect JSON.
+      test: ["CMD", "python", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3)); assert data.get('status') == 'ready', data"]
+      start_period: 20s
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [e2elab]
+    restart: unless-stopped
+
+  rviz:
+    build:
+      context: ../..
+      dockerfile: deploy/e2e/rviz/Dockerfile
+    network_mode: "service:ros2"
+    ipc: "service:ros2"
+    environment:
+      ROS_DOMAIN_ID: "31"
+      ROS_LOCALHOST_ONLY: "0"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      QT_X11_NO_MITSHM: "1"
+    depends_on:
+      ros2: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 55s
+      interval: 8s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  e2e:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: deploy/e2e/tester/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_API_KEY: local-e2e-api-key
+      ROSBRIDGE_URL: ws://ros2:9090
+      RVIZ_URL: http://ros2:6080/vnc.html
+      ISWIRE_BROKER_URI: amqp://guest:guest@rabbitmq:5672/
+      E2E_ACTION_TEST: "false"
+      E2E_LOOP: "false"
+      REPORT_FILE: /reports/e2e-report.json
+    volumes:
+      - ./reports:/reports
+    depends_on:
+      gateway: {condition: service_healthy}
+      rviz: {condition: service_started}
+    networks: [e2elab]
+
+  e2e-loop:
+    # Persistent random demonstration; the finite "test" profile is unchanged.
+    profiles: [loop]
+    build:
+      context: ../..
+      dockerfile: deploy/e2e/tester/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_API_KEY: local-e2e-api-key
+      ROSBRIDGE_URL: ws://ros2:9090
+      RVIZ_URL: http://ros2:6080/vnc.html
+      ISWIRE_BROKER_URI: amqp://guest:guest@rabbitmq:5672/
+      E2E_LOOP: "true"
+      E2E_LOOP_INTERVAL_SECONDS: "1.0"
+      E2E_LOOP_RETRY_DELAY_SECONDS: "5.0"
+      E2E_LOOP_GOAL_LIMIT: "2.5"
+      E2E_LOOP_SEED: ""
+      E2E_LOOP_HISTORY_MAX_BYTES: "10485760"
+      E2E_LOOP_REPORT_FILE: /reports/e2e-loop-report.json
+      E2E_LOOP_HISTORY_FILE: /reports/e2e-loop-history.jsonl
+    volumes:
+      - ./reports:/reports
+    depends_on:
+      gateway: {condition: service_healthy}
+      rviz: {condition: service_started}
+    networks: [e2elab]
+    restart: unless-stopped
+
+networks:
+  e2elab:
+    driver: bridge

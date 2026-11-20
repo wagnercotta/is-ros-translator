@@ -1,0 +1,53 @@
+# Docker-only functional test stack; hostnames are Compose service names.
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+iswire:
+  enabled: true
+  url_env: ISWIRE_BROKER_URI
+  request_topic: ROSTranslator.v2.Request
+  robot_task_topic: ROSTranslator.v2.RobotTask
+  event_prefix: ROSTranslator.v2.Event
+  pose_event_prefix: ROSTranslator.v2.Pose
+security:
+  require_api_key: true
+  api_key_env: GATEWAY_API_KEY
+  max_request_bytes: 1048576
+  max_response_bytes: 4194304
+  allow_live_schema_fallback: false
+schema_ttl_seconds: 300
+subscription_lease_seconds: 60
+max_subscriptions: 100
+default_timeout_seconds: 30
+robots:
+  jackal_ros1:
+    ros_version: 1
+    host: ros1
+    port: 9090
+    navigation:
+      action: /move_base
+      action_type: move_base_msgs/MoveBaseAction
+      frame_id: map
+    map_service: /dynamic_map
+    odom_topic: /odom
+    allowed:
+      publish: [/chatter]
+      subscribe: [/odom, /chatter]
+      services: [/dynamic_map]
+      actions: [/move_base]
+  turtlebot_ros2:
+    ros_version: 2
+    host: ros2
+    port: 9090
+    navigation:
+      action: /navigate_to_pose
+      action_type: nav2_msgs/action/NavigateToPose
+      frame_id: map
+    map_service: /map_server/map
+    odom_topic: /odom
+    allowed:
+      publish: [/chatter]
+      subscribe: [/odom, /chatter]
+      services: [/map_server/map]
+      actions: [/navigate_to_pose]

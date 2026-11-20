@@ -1,0 +1,161 @@
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+iswire:
+  enabled: true
+  url_env: ISWIRE_BROKER_URI
+  request_topic: ROSTranslator.v2.Request
+  robot_task_topic: ROSTranslator.v2.RobotTask
+  event_prefix: ROSTranslator.v2.Event
+  pose_event_prefix: ROSTranslator.v2.Pose
+security:
+  require_api_key: true
+  api_key_env: GATEWAY_API_KEY
+  allow_live_schema_fallback: false
+  max_request_bytes: 1048576
+  max_response_bytes: 4194304
+schema_ttl_seconds: 300
+subscription_lease_seconds: 120
+max_subscriptions: 100
+default_timeout_seconds: 30
+robots:
+  create_3:
+    ros_version: 2
+    host: 127.0.0.1
+    port: 9090
+    navigation:
+      action: /navigate_to_position
+      action_type: irobot_create_msgs/action/NavigateToPosition
+      frame_id: odom
+    map_service: null
+    odom_topic: /odom
+    allowed:
+      publish: [/cmd_vel]
+      subscribe: [/odom, /battery_state, /imu, /hazard_detection, /dock_status, /wheel_status, /stop_status, /tf, /tf_static]
+      services: [/e_stop]
+      actions: [/navigate_to_position, /drive_distance, /rotate_angle, /drive_arc, /dock, /undock, /wall_follow]
+    capabilities:
+      navigate_to_position:
+        operation: ros.action
+        endpoint: /navigate_to_position
+        ros_type: irobot_create_msgs/action/NavigateToPosition
+        default_payload:
+          goal_pose:
+            header: {frame_id: odom}
+            pose:
+              position: {x: 0.0, y: 0.0, z: 0.0}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+          achieve_goal_heading: true
+        description: Navigate to an absolute pose in the odom frame
+      drive_distance:
+        operation: ros.action
+        endpoint: /drive_distance
+        ros_type: irobot_create_msgs/action/DriveDistance
+        default_payload: {distance: 0.25, max_translation_speed: 0.1}
+        description: Drive forward or backward a distance in metres
+      rotate_angle:
+        operation: ros.action
+        endpoint: /rotate_angle
+        ros_type: irobot_create_msgs/action/RotateAngle
+        default_payload: {angle: 0.785398, max_rotation_speed: 0.4}
+        description: Rotate relative to the current heading in radians
+      drive_arc:
+        operation: ros.action
+        endpoint: /drive_arc
+        ros_type: irobot_create_msgs/action/DriveArc
+        default_payload: {angle: 0.785398, radius: 0.3, translate_direction: 1, max_translation_speed: 0.1}
+        description: Drive a relative arc
+      dock:
+        operation: ros.action
+        endpoint: /dock
+        ros_type: irobot_create_msgs/action/Dock
+        allow_overrides: false
+        description: Return to the charging dock when it is visible
+      undock:
+        operation: ros.action
+        endpoint: /undock
+        ros_type: irobot_create_msgs/action/Undock
+        allow_overrides: false
+        description: Leave the charging dock
+      follow_wall:
+        operation: ros.action
+        endpoint: /wall_follow
+        ros_type: irobot_create_msgs/action/WallFollow
+        default_payload:
+          follow_side: 1
+          max_runtime: {sec: 10, nanosec: 0}
+        description: Follow a wall on the left or right for a limited time
+      set_velocity:
+        operation: ros.publish
+        endpoint: /cmd_vel
+        ros_type: geometry_msgs/msg/Twist
+        default_payload:
+          linear: {x: 0.0, y: 0.0, z: 0.0}
+          angular: {x: 0.0, y: 0.0, z: 0.0}
+        description: Publish a single robot-relative velocity command
+      stop_velocity:
+        operation: ros.publish
+        endpoint: /cmd_vel
+        ros_type: geometry_msgs/msg/Twist
+        default_payload:
+          linear: {x: 0.0, y: 0.0, z: 0.0}
+          angular: {x: 0.0, y: 0.0, z: 0.0}
+        allow_overrides: false
+        description: Publish zero velocity; does not cancel an active action
+      emergency_stop:
+        operation: ros.service
+        endpoint: /e_stop
+        ros_type: irobot_create_msgs/srv/EStop
+        default_payload: {e_stop_on: true}
+        allow_overrides: false
+        description: Disable wheel motors using the E-Stop service
+      release_emergency_stop:
+        operation: ros.service
+        endpoint: /e_stop
+        ros_type: irobot_create_msgs/srv/EStop
+        default_payload: {e_stop_on: false}
+        allow_overrides: false
+        description: Re-enable the wheel motors after a stop
+      monitor_odometry:
+        operation: ros.subscribe
+        endpoint: /odom
+        ros_type: nav_msgs/msg/Odometry
+        description: Subscribe to odometry events; requires subscriber_id
+      stop_monitoring_odometry:
+        operation: ros.unsubscribe
+        endpoint: /odom
+        description: Stop odometry events for subscriber_id
+      monitor_battery:
+        operation: ros.subscribe
+        endpoint: /battery_state
+        ros_type: sensor_msgs/msg/BatteryState
+        description: Subscribe to battery events; requires subscriber_id
+      stop_monitoring_battery:
+        operation: ros.unsubscribe
+        endpoint: /battery_state
+        description: Stop battery events for subscriber_id
+      monitor_hazards:
+        operation: ros.subscribe
+        endpoint: /hazard_detection
+        ros_type: irobot_create_msgs/msg/HazardDetectionVector
+        description: Subscribe to hazard detections; requires subscriber_id
+      stop_monitoring_hazards:
+        operation: ros.unsubscribe
+        endpoint: /hazard_detection
+        description: Stop hazard events for subscriber_id
+      monitor_imu:
+        operation: ros.subscribe
+        endpoint: /imu
+        ros_type: sensor_msgs/msg/Imu
+        description: Subscribe to IMU data; requires subscriber_id
+      monitor_dock:
+        operation: ros.subscribe
+        endpoint: /dock_status
+        ros_type: irobot_create_msgs/msg/DockStatus
+        description: Subscribe to docking status; requires subscriber_id
+      monitor_wheels:
+        operation: ros.subscribe
+        endpoint: /wheel_status
+        ros_type: irobot_create_msgs/msg/WheelStatus
+        description: Subscribe to wheel status; requires subscriber_id

@@ -1,0 +1,12 @@
+http: {enabled: true, host: "127.0.0.1", port: 8080}
+iswire: {enabled: false}
+security: {require_api_key: true, api_key_env: GATEWAY_API_KEY, allow_live_schema_fallback: false}
+robots:
+  robot_ros2:
+    ros_version: 2
+    host: "127.0.0.1"
+    port: 9090
+    navigation: {action: "/navigate_to_pose", action_type: "nav2_msgs/action/NavigateToPose", frame_id: "map"}
+    map_service: "/map_server/map"
+    odom_topic: "/odom"
+    allowed: {publish: ["/chatter"], subscribe: ["/odom", "/chatter"], services: ["/map_server/map"], actions: ["/navigate_to_pose"]}

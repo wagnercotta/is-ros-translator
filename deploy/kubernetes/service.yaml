@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: is-ros-translator
+  namespace: is-ros-translator
+spec:
+  type: ClusterIP
+  selector:
+    app: is-ros-translator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP

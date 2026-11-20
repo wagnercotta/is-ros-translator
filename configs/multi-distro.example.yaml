@@ -1,0 +1,96 @@
+# Three separate ROS graphs, a single PrIS/is-wire Core.
+# Run one ROSBridge instance per ROS graph; see README.md for the lab walkthrough.
+http:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+iswire:
+  enabled: true
+  url_env: ISWIRE_BROKER_URI
+  request_topic: ROSTranslator.v2.Request
+  robot_task_topic: ROSTranslator.v2.RobotTask
+  event_prefix: ROSTranslator.v2.Event
+  pose_event_prefix: ROSTranslator.v2.Pose
+security:
+  require_api_key: true
+  api_key_env: GATEWAY_API_KEY
+  allow_live_schema_fallback: false
+
+bridges:
+  jazzy_local:
+    ros_version: 2
+    distribution: jazzy
+    host: 127.0.0.1
+    port: 9090
+    domain_id: 0 # Must match Create 3 Application > Configuration.
+    rmw_implementation: rmw_fastrtps_cpp
+  noetic_local:
+    ros_version: 1
+    distribution: noetic
+    host: 127.0.0.1
+    port: 9091
+  humble_local:
+    ros_version: 2
+    distribution: humble
+    host: 127.0.0.1
+    port: 9092
+    domain_id: 10 # Replace with the actual Humble robot's DDS domain.
+    rmw_implementation: rmw_cyclonedds_cpp
+
+robots:
+  create_3:
+    ros_version: 2
+    bridge_id: jazzy_local
+    navigation:
+      action: /create3/navigate_to_position
+      action_type: irobot_create_msgs/action/NavigateToPosition
+      frame_id: odom
+    map_service: null
+    odom_topic: /create3/odom
+    allowed:
+      subscribe: [/create3/odom, /create3/dock_status]
+      actions: [/create3/navigate_to_position, /create3/dock, /create3/undock, /create3/drive_distance]
+    capabilities:
+      undock:
+        operation: ros.action
+        endpoint: /create3/undock
+        ros_type: irobot_create_msgs/action/Undock
+        allow_overrides: false
+      dock:
+        operation: ros.action
+        endpoint: /create3/dock
+        ros_type: irobot_create_msgs/action/Dock
+        allow_overrides: false
+      drive_distance:
+        operation: ros.action
+        endpoint: /create3/drive_distance
+        ros_type: irobot_create_msgs/action/DriveDistance
+        default_payload: {distance: 0.25, max_translation_speed: 0.1}
+
+  ros1_robot:
+    ros_version: 1
+    bridge_id: noetic_local
+    navigation:
+      action: /move_base
+      action_type: move_base_msgs/MoveBaseAction
+      frame_id: map
+    map_service: /static_map
+    odom_topic: /odom
+    allowed:
+      subscribe: [/odom]
+      actions: [/move_base]
+      services: [/static_map]
+
+  ros2_humble_robot:
+    ros_version: 2
+    bridge_id: humble_local
+    navigation:
+      action: /navigate_to_pose
+      action_type: nav2_msgs/action/NavigateToPose
+      frame_id: map
+    map_service: /map_server/map
+    odom_topic: /odom
+    allowed:
+      subscribe: [/odom]
+      actions: [/navigate_to_pose]
+      services: [/map_server/map]

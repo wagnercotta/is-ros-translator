@@ -1,0 +1,55 @@
+# Run from the repository root:
+# docker compose --env-file deploy/lab/.env -f deploy/lab/compose.yaml up -d --build
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rostranslator-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${LAB_RABBITMQ_USER:?Set LAB_RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${LAB_RABBITMQ_PASSWORD:?Set LAB_RABBITMQ_PASSWORD}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  bridge-jazzy:
+    build:
+      context: ../..
+      dockerfile: deploy/rosbridges/ros2/Dockerfile
+      args:
+        ROS_DISTRO: jazzy
+    container_name: rostranslator-bridge-jazzy
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      ROS_DOMAIN_ID: ${LAB_ROS_DOMAIN_ID:-0}
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
+      FASTRTPS_DEFAULT_PROFILES_FILE: /etc/fastdds/unicast.xml
+      ROSBRIDGE_PORT: "9090"
+      ROSBRIDGE_BIND_ADDRESS: "127.0.0.1"
+    volumes:
+      - ../../configs/fastdds-unicast.xml:/etc/fastdds/unicast.xml:ro
+
+  core:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    container_name: rostranslator-core
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GATEWAY_API_KEY: ${LAB_API_KEY:?Set LAB_API_KEY}
+      ISWIRE_BROKER_URI: amqp://${LAB_RABBITMQ_USER}:${LAB_RABBITMQ_PASSWORD}@127.0.0.1:5672/
+    volumes:
+      - ../../configs/create3-lab.yaml:/app/configs/create3-lab.yaml:ro
+    command: ["is-ros-translator", "--config", "/app/configs/create3-lab.yaml"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      bridge-jazzy:
+        condition: service_started

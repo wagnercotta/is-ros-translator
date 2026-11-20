@@ -1,0 +1,88 @@
+# Self-contained Linux Docker Compose lab: ROS1 Noetic, ROS2 Jazzy, RabbitMQ, gateway, tester.
+# All rosbridge sockets remain INTERNAL to the lab unless explicitly bound to localhost.
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-labgateway}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Copy deploy/ros-test/.env.example to .env and set password}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 8s
+      retries: 20
+      timeout: 5s
+      start_period: 10s
+    restart: unless-stopped
+    networks: [roslab]
+
+  ros1:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros1/Dockerfile
+    environment:
+      ROS_MASTER_URI: http://127.0.0.1:11311
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 35s
+      interval: 8s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+    networks: [roslab]
+
+  ros2:
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/ros2/Dockerfile
+    environment:
+      ROS_DOMAIN_ID: "31"
+    healthcheck:
+      test: ["CMD", "/opt/ros-lab/health.sh"]
+      start_period: 40s
+      interval: 8s
+      timeout: 10s
+      retries: 20
+    restart: unless-stopped
+    networks: [roslab]
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    command: ["is-ros-translator", "--config", "configs/docker-integration.yaml"]
+    environment:
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Copy deploy/ros-test/.env.example to .env and set API key}
+      ISWIRE_BROKER_URI: amqp://${RABBITMQ_USER:-labgateway}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    volumes:
+      - ../../configs/docker-integration.yaml:/app/configs/docker-integration.yaml:ro
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      ros1: {condition: service_healthy}
+      ros2: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${GATEWAY_HTTP_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; data=json.load(urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3)); assert data.get('status') == 'ready', data"]
+      interval: 5s
+      start_period: 15s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [roslab]
+
+  tester:
+    profiles: [test]
+    build:
+      context: ../..
+      dockerfile: deploy/ros-test/tester/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?Set GATEWAY_API_KEY}
+      ISWIRE_BROKER_URI: amqp://${RABBITMQ_USER:-labgateway}:${RABBITMQ_PASSWORD}@rabbitmq:5672/
+    depends_on:
+      gateway: {condition: service_healthy}
+    networks: [roslab]
+
+networks:
+  roslab:
+    internal: false  # Outbound access for builds is needed, but no rosbridge ports are published.

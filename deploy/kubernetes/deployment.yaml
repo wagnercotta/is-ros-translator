@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: is-ros-translator
+  namespace: is-ros-translator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: is-ros-translator
+  template:
+    metadata:
+      labels:
+        app: is-ros-translator
+    spec:
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: gateway
+          image: registry.example.com/labvisio/is-ros-translator:v0.4.10
+          imagePullPolicy: IfNotPresent
+          command: ["is-ros-translator"]
+          args: ["--config", "/etc/is-ros-translator/gateway.yaml"]
+          env:
+            - name: GATEWAY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: is-ros-translator-credentials
+                  key: GATEWAY_API_KEY
+            - name: ISWIRE_BROKER_URI
+              valueFrom:
+                secretKeyRef:
+                  name: is-ros-translator-credentials
+                  key: ISWIRE_BROKER_URI
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/is-ros-translator
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - 'import json, urllib.request; r=json.load(urllib.request.urlopen("http://127.0.0.1:8080/health/ready", timeout=3)); assert r["status"] == "ready", r'
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: is-ros-translator-config

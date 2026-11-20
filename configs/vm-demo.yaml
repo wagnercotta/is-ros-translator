@@ -1,0 +1,63 @@
+# Example: gateway VM 192.168.56.10; ROS1 VM 192.168.56.11; ROS2 VM 192.168.56.12
+# Update the hosts for your VMware/VirtualBox network. rosbridge ports: 9090.
+http:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+iswire:
+  enabled: true   # The sole AMQP transport
+  url_env: ISWIRE_BROKER_URI
+  request_topic: ROSTranslator.v2.Request
+  event_prefix: ROSTranslator.v2.Event
+  legacy_robot_ids: {}  # e.g. {"1": "jackal_ros1"}; partial 2022 RPC migration
+security:
+  require_api_key: true
+  api_key_env: GATEWAY_API_KEY
+  max_request_bytes: 1048576
+  max_response_bytes: 4194304
+  allow_live_schema_fallback: false   # Strict schema validation by default
+schema_ttl_seconds: 300
+subscription_lease_seconds: 300
+max_subscriptions: 100
+default_timeout_seconds: 10
+robots:
+  jackal_ros1:
+    ros_version: 1
+    host: "192.168.56.11"
+    port: 9090
+    navigation:
+      action: /move_base
+      action_type: move_base_msgs/MoveBaseAction
+      frame_id: map
+    map_service: /dynamic_map
+    odom_topic: /odom
+    allowed:
+      publish:
+        - /chatter         # harmless demonstration
+      subscribe:
+        - /odom
+        - /chatter
+      services:
+        - /dynamic_map
+      actions:
+        - /move_base
+  turtlebot_ros2:
+    ros_version: 2
+    host: "192.168.56.12"
+    port: 9090
+    navigation:
+      action: /navigate_to_pose
+      action_type: nav2_msgs/action/NavigateToPose
+      frame_id: map
+    map_service: /map_server/map
+    odom_topic: /odom
+    allowed:
+      publish:
+        - /chatter         # change only after authorising specific use cases
+      subscribe:
+        - /odom
+        - /chatter
+      services:
+        - /map_server/map
+      actions:
+        - /navigate_to_pose
