@@ -6,9 +6,11 @@ from collections.abc import Mapping
 from enum import Enum
 import logging
 import threading
+import time
 
 from ..config import RobotConfig
 from ..errors import GatewayError, InvalidRequest, OperationTimeout, ROSUnavailable
+from ..evidence import evidence
 from ..models import Target
 from .base import pose_stamped
 
@@ -102,20 +104,31 @@ class ROS2Adapter:
             if feedback:
                 feedback(dict(value) if isinstance(value, Mapping) else {"value": str(value)})
 
+        started = time.monotonic_ns()
         goal_id = client.send_goal(roslibpy.Goal(goal_dict), result_cb, feedback_cb, error_cb)
         if not goal_id:
+            evidence("ros2_adapter", "goal_not_accepted", endpoint=name, action_type=ros_type)
             raise ROSUnavailable(f"ROS 2 action {name} did not accept the goal")
+        evidence("ros2_adapter", "goal_sent", endpoint=name, action_type=ros_type,
+                 goal_id=str(goal_id))
         if not done.wait(timeout):
+            evidence("ros2_adapter", "goal_timeout", endpoint=name, action_type=ros_type,
+                     goal_id=str(goal_id), timeout_seconds=timeout)
             try:
                 client.cancel_goal(goal_id)
             except Exception:
                 LOG.warning("Could not cancel ROS 2 action %s", name, exc_info=True)
             raise OperationTimeout(f"ROS 2 action {name} exceeded {timeout}s; cancellation best-effort")
         if "error" in outcome:
+            evidence("ros2_adapter", "goal_failed", endpoint=name, action_type=ros_type,
+                     goal_id=str(goal_id), error=outcome["error"])
             raise GatewayError(outcome["error"], "action_failed", 502)
         result = outcome["result"]
         raw_status = result.get("status") if isinstance(result, Mapping) else None
         status = _normalise_goal_status(raw_status)
+        evidence("ros2_adapter", "goal_terminal", endpoint=name, action_type=ros_type,
+                 goal_id=str(goal_id), raw_status=str(raw_status), terminal_status=status,
+                 duration_ms=round((time.monotonic_ns() - started) / 1e6, 3))
         if status is None:
             raise GatewayError(
                 f"ROS 2 action {name} returned an invalid terminal status: {raw_status!r}",

@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import importlib.metadata
 import logging
 import math
 import os
+import platform
 import queue
 import socket
 import threading
@@ -29,6 +31,7 @@ from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Struct
 
 from .errors import GatewayError
+from .evidence import evidence, evidence_scope, navigation_args
 from .models import Command
 
 LOG = logging.getLogger(__name__)
@@ -99,6 +102,16 @@ class ISWireTransport:
         from is_msgs.robot_pb2 import RobotTaskRequest, RobotTaskReply  # noqa: F401
         from is_msgs.common_pb2 import Pose  # noqa: F401
         self._loop = asyncio.get_running_loop()
+        try:
+            package_version = importlib.metadata.version("is-ros-translator-v2")
+        except importlib.metadata.PackageNotFoundError:
+            package_version = None
+        evidence("core", "session_started", python=platform.python_version(),
+                 gateway_package_version=package_version,
+                 robots={rid: {"ros_version": cfg.ros_version,
+                                "navigation_action": cfg.navigation.action,
+                                "navigation_action_type": cfg.navigation.action_type}
+                         for rid, cfg in self.settings.robots.items()})
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, args=(uri,), daemon=True,
                                         name="is-wire-rpc")
@@ -160,7 +173,13 @@ class ISWireTransport:
             return None
 
     def _execute(self, command: Command):
-        future = asyncio.run_coroutine_threadsafe(self._gateway.execute(command), self._loop)
+        async def execute_traced():
+            with evidence_scope(robot_id=command.robot_id,
+                                request_id=command.request_id,
+                                operation=command.operation):
+                return await self._gateway.execute(command)
+
+        future = asyncio.run_coroutine_threadsafe(execute_traced(), self._loop)
         try:
             timeout = (command.timeout_seconds or self.settings.default_timeout_seconds) + 10
             return future.result(timeout=timeout)
@@ -169,16 +188,37 @@ class ISWireTransport:
             return {"ok": False, "error": "timeout", "detail": "Gateway command timed out"}
 
     def _handle_struct_request(self, incoming):
+        correlation_id = str(getattr(incoming, "correlation_id", None))
+        request_id = None
+        robot_id = None
+        operation = None
         try:
             if len(incoming.body) > self.settings.security.max_request_bytes:
                 raise ValueError("is-wire request too large")
             request = MessageToDict(incoming.unpack(Struct), preserving_proto_field_name=True)
             command = Command.model_validate(request)
-            return struct_message(self._execute(command))
+            request_id, robot_id, operation = (command.request_id, command.robot_id,
+                                               command.operation)
+            evidence("iswire", "request_received", correlation_id=correlation_id,
+                     request_id=request_id, robot_id=robot_id, operation=operation,
+                     request_topic=self.cfg.request_topic,
+                     navigation_args=navigation_args(command.args)
+                         if operation in ("navigate", "follow_waypoints") else None)
+            response = self._execute(command)
+            evidence("iswire", "reply_prepared", correlation_id=correlation_id,
+                     request_id=request_id, robot_id=robot_id, operation=operation,
+                     ok=response.get("ok"), error=response.get("error"))
+            return struct_message(response)
         except GatewayError as exc:
+            evidence("iswire", "request_rejected", correlation_id=correlation_id,
+                     request_id=request_id, robot_id=robot_id, operation=operation,
+                     error=exc.code)
             return struct_message({"ok": False, "error": exc.code, "detail": str(exc)})
         except Exception as exc:
             LOG.warning("is-wire Struct command failed: %s", exc)
+            evidence("iswire", "request_rejected", correlation_id=correlation_id,
+                     request_id=request_id, robot_id=robot_id, operation=operation,
+                     error=type(exc).__name__)
             return struct_message({"ok": False, "error": "invalid_request", "detail": str(exc)})
 
     def _handle_robot_task(self, incoming):
@@ -326,6 +366,7 @@ class ISWireTransport:
                         LOG.debug("Failed closing previous is-wire channel", exc_info=True)
 
     async def stop(self):
+        evidence("core", "session_stopping")
         self._stop.set()
         if self._thread is not None:
             await asyncio.to_thread(self._thread.join, 3.0)

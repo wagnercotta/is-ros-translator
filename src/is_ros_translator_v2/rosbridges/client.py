@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Callable
 from ..config import RobotConfig
+from ..evidence import evidence, evidence_context
 from ..errors import OperationTimeout, ROSUnavailable
 
 LOG = logging.getLogger(__name__)
@@ -178,9 +179,31 @@ class RosBridge:
     async def action(self, name: str, ros_type: str, goal_dict: dict, timeout: float,
                      feedback: Callable[[dict], None] | None = None):
         conn = await self.ensure_connected()
-        if self.robot.ros_version == 1:
-            return await asyncio.to_thread(self._ros1_action, conn, name, ros_type, goal_dict, timeout, feedback)
-        return await asyncio.to_thread(self._ros2_action, conn, name, ros_type, goal_dict, timeout, feedback)
+        started = time.monotonic_ns()
+        context = evidence_context()
+        evidence("bridge", "action_dispatched", ros_version=self.robot.ros_version,
+                 endpoint=name, action_type=ros_type,
+                 goal=goal_dict if context.get("operation") in
+                     ("navigate", "follow_waypoints") else None)
+        try:
+            if self.robot.ros_version == 1:
+                result = await asyncio.to_thread(self._ros1_action, conn, name, ros_type,
+                                                 goal_dict, timeout, feedback)
+            else:
+                result = await asyncio.to_thread(self._ros2_action, conn, name, ros_type,
+                                                 goal_dict, timeout, feedback)
+        except Exception as exc:
+            evidence("bridge", "action_failed", ros_version=self.robot.ros_version,
+                     endpoint=name, action_type=ros_type,
+                     duration_ms=round((time.monotonic_ns() - started) / 1e6, 3),
+                     error=f"{type(exc).__name__}: {exc}")
+            raise
+        evidence("bridge", "action_completed", ros_version=self.robot.ros_version,
+                 endpoint=name, action_type=ros_type,
+                 goal_id=result.get("goal_id") if isinstance(result, dict) else None,
+                 terminal_status=result.get("status") if isinstance(result, dict) else None,
+                 duration_ms=round((time.monotonic_ns() - started) / 1e6, 3))
+        return result
 
     @staticmethod
     def _ros1_action(conn, name, ros_type, goal_dict, timeout, feedback):

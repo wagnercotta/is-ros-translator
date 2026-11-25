@@ -1,0 +1,8 @@
+# Optional overlay for persistent Core/bridge scientific evidence.
+# Use alongside compose.yaml; do not start a second Core instance.
+services:
+  core:
+    environment:
+      ROSTRANSLATOR_EVIDENCE_DIR: /app/evidence
+    volumes:
+      - "${LAB_EVIDENCE_HOST_DIR:?Set LAB_EVIDENCE_HOST_DIR to a writable absolute host path}:/app/evidence"

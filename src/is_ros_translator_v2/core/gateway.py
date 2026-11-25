@@ -10,6 +10,7 @@ from ..adapters.base import pose_stamped
 from ..adapters.factory import create_adapter, create_transports
 from ..config import Settings
 from ..errors import InvalidRequest, NoRobot, ROSUnavailable, GatewayError, OperationTimeout
+from ..evidence import evidence, evidence_scope
 from ..events import EventBus
 from ..models import Command, Target, Waypoints, SubscriptionSpec
 from ..policy import require_allowed, check_type
@@ -133,19 +134,31 @@ class Gateway:
             if operation == "navigate":
                 target = Target.model_validate(args)
                 async with self._task_locks[command.robot_id]:
-                    result = await self._navigate(command.robot_id, target, timeout, req_id)
+                    with evidence_scope(robot_id=command.robot_id, request_id=req_id,
+                                        operation=operation, waypoint_index=0):
+                        result = await self._navigate(command.robot_id, target, timeout, req_id)
             elif operation == "follow_waypoints":
                 steps = Waypoints.model_validate(args).waypoints
                 async with self._task_locks[command.robot_id]:
                     start = time.monotonic()
                     completed = []
+                    evidence("core", "sequence_started", robot_id=command.robot_id,
+                             request_id=req_id, operation=operation, total_waypoints=len(steps))
                     for index, target in enumerate(steps):
                         remaining = timeout - (time.monotonic() - start)
                         if remaining <= 0:
                             raise OperationTimeout(f"Waypoint sequence timed out after {len(completed)} waypoints")
-                        res = await self._navigate(command.robot_id, target, remaining, req_id)
+                        with evidence_scope(robot_id=command.robot_id, request_id=req_id,
+                                            operation=operation, waypoint_index=index):
+                            evidence("core", "sequence_step_started", total_waypoints=len(steps))
+                            res = await self._navigate(command.robot_id, target, remaining, req_id)
+                            evidence("core", "sequence_step_completed",
+                                     goal_id=res.get("goal_id"), terminal_status=res.get("status"))
                         completed.append({"index": index, "result": res})
                     result = {"completed_waypoints": len(completed), "outcomes": completed}
+                    evidence("core", "sequence_completed", robot_id=command.robot_id,
+                             request_id=req_id, operation=operation,
+                             completed_waypoints=len(completed))
             elif operation in ("ros.subscribe", "ros.unsubscribe"):
                 spec = SubscriptionSpec.model_validate({"robot_id": command.robot_id, **args})
                 result = (await self.subscriptions.add(spec) if operation == "ros.subscribe"
@@ -242,10 +255,26 @@ class Gateway:
         if not robot.navigation.enabled:
             raise InvalidRequest(f"Navigation is disabled for {rid}")
         goal = self.adapter(rid).navigation_goal(target)
-        return await self.bridge(rid).action(robot.navigation.action, robot.navigation.action_type, goal, timeout,
-            feedback=lambda val: self.events.emit({"kind": "navigation_feedback", "robot_id": rid,
-                                                   "endpoint": robot.navigation.action, "request_id": request_id,
-                                                   "payload": val}))
+        evidence("core", "navigation_goal_prepared", robot_id=rid,
+                 request_id=request_id, ros_version=robot.ros_version,
+                 adapter=type(self.adapter(rid)).__name__,
+                 endpoint=robot.navigation.action,
+                 action_type=robot.navigation.action_type, goal=goal)
+        try:
+            result = await self.bridge(rid).action(
+                robot.navigation.action, robot.navigation.action_type, goal, timeout,
+                feedback=lambda val: self.events.emit({"kind": "navigation_feedback", "robot_id": rid,
+                                                       "endpoint": robot.navigation.action,
+                                                       "request_id": request_id, "payload": val}))
+        except Exception as exc:
+            evidence("core", "navigation_goal_failed", robot_id=rid, request_id=request_id,
+                     endpoint=robot.navigation.action, error=f"{type(exc).__name__}: {exc}")
+            raise
+        evidence("core", "navigation_goal_completed", robot_id=rid, request_id=request_id,
+                 endpoint=robot.navigation.action,
+                 goal_id=result.get("goal_id") if isinstance(result, dict) else None,
+                 terminal_status=result.get("status") if isinstance(result, dict) else None)
+        return result
 
     async def _one_odometry(self, rid: str, timeout: float):
         robot = self.robot(rid)

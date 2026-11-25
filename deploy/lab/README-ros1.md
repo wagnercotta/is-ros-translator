@@ -11,11 +11,18 @@ physical robot or a navigation planner. It publishes `/odom`, `/map`,
 
 ## Setup (after the current physical experiment has finished)
 
-Add to `deploy/lab/.env`:
+Prepare a local environment file:
 
-```dotenv
-LAB_CORE_CONFIG=../../configs/create3-ros1-lab.yaml
+```bash
+cp deploy/lab/.env.example deploy/lab/.env
 ```
+
+Set the RabbitMQ password, API key and `LAB_PI_WIFI_IP` to your real values.
+Uncomment `LAB_CORE_CONFIG=../../configs/create3-ros1-lab.yaml` in the local
+`.env` file when running with the ROS 1 profile. The ROS 2 bridge image
+automatically replaces the `PI_WIFI_IP` placeholder in the tracked
+`configs/fastdds-unicast.example.xml` during its build; no generated XML needs
+to be copied from an older VM or committed to GitHub.
 
 From the repository root:
 
@@ -33,8 +40,7 @@ RViz (noVNC): `http://127.0.0.1:6081/vnc.html`. For a remote VM,
 forward `6081` using SSH. The ROS 1 RosBridge listens on
 `127.0.0.1:9091`; ROS 2 continues on `127.0.0.1:9090`.
 
-Copy the companion physical-client script version with `--ros1-mirror` support
-to `~/rostranslator/create3_physical_e2e.py`, then inspect its dry run:
+Use the versioned physical client at the repository root and inspect its dry run:
 
 ```bash
 python3 create3_physical_e2e.py --seed 2027 --ros1-mirror
@@ -57,3 +63,25 @@ For physical safety, the client completes and checks the ROS 1 simulated goal
 before sending its counterpart to Create 3. It is a mirrored **sequence**,
 not concurrent robot execution. The dock approach is also mirrored as a waypoint
 20 cm before the station; only the real Create 3 receives the final `dock` action.
+
+## Persistent Core/bridge evidence
+
+To enable scientific evidence, make a dedicated host directory writable by
+the Core container user (UID 10001), and set the variable below before Compose:
+
+```bash
+export LAB_EVIDENCE_HOST_DIR="$HOME/rostranslator-evidence"
+```
+
+Then include the tracked overlay in the usual Compose command:
+
+```bash
+docker compose --env-file deploy/lab/.env \
+  -f deploy/lab/compose.yaml -f deploy/lab/compose.evidence.yaml \
+  --profile ros1 up -d --build
+```
+
+The resulting file is `$LAB_EVIDENCE_HOST_DIR/core_bridge_events.jsonl`.
+See `docs/SCIENTIFIC_EVIDENCE.md` for request IDs, goal IDs, ordering and
+evidence verification. The physical client has an optional
+`--validate-follow-waypoints` mode for E2 in its fifth loop.
