@@ -189,29 +189,65 @@ Os dados brutos mencionados acima foram fornecidos para esta revisão, mas **nã
 
 > Em uma execução integrada com um simulador ROS 1 e um iRobot Create 3 físico via ROS 2, o ROS Translator v2 processou 20 requisições semânticas de navegação (`18 navigate` e `2 follow_waypoints`) por IS-Wire, resultando em 22 objetivos ROS concluídos com sucesso. Cada requisição `follow_waypoints` continha dois objetivos, executados na ordem observada pelo Core, com estados terminais e resposta final correlacionados. As 52 requisições de todos os tipos realizadas pelo cliente foram associadas a eventos de entrada e resposta no Core. O docking físico final foi abortado pelo backend ROS 2, e o erro foi propagado corretamente ao cliente. Esses resultados sustentam a interoperabilidade funcional e a composição sequencial de tarefas; não constituem avaliação de precisão de navegação ou de desempenho do transporte.
 
-## 7. Extensão do protocolo — E3: comandos heterogêneos (a executar)
+## 7. Extensão do protocolo — E3: destinos diferentes em execução concorrente (a executar)
 
-Após a sessão analisada, foi adicionada uma etapa experimental complementar para
-demonstrar que **o mesmo canal PrIS/IS-Wire encaminha também operações distintas**,
-sem exigir que ambos os backends recebam a mesma ação de navegação:
+O ensaio E3 foi incorporado **após** a sessão de 15:55 UTC para examinar uma
+capacidade ainda não observada em E1/E2: **duas requisições `navigate`
+independentes, simultaneamente encaminhadas a ROS 1 e ROS 2, com destinos
+intencionalmente distintos**.
 
-| Backend | Comando novo | Mecanismo e resposta esperada |
+| Propriedade | ROS 1 (`ros1_sim`) | ROS 2 (`create_3`) |
 | --- | --- | --- |
-| ROS 1 simulado | `get_map` | Serviço `/dynamic_map`, resposta `OccupancyGrid` com dimensões e dados válidos |
-| ROS 2 Create 3 | `get_odometry` | Assinatura do tópico `/create3/odom`, mensagem `Odometry` válida |
+| Destino no referencial físico (m) | **(-0.8, +0.6)** | **(+0.8, -0.6)** |
+| Referencial da ação | `map` | `odom` |
+| Posição efetivamente solicitada (m) | **(-0.8, +0.6)** | **(-0.7, +0.4)**, após a transformação nominal do cliente |
+| Executor | Simulador ROS 1 `/move_base` | Create 3 físico, ação ROS 2 `/create3/navigate_to_position` |
 
-E3 pode ser executado isoladamente, sem movimentação física, por meio de
-`python3 create3_physical_e2e.py --distinct-commands-only --seed 2027`.
-Também é executado antes dos movimentos no modo completo `--execute --ros1-mirror`.
-São registradas duas requisições com `robot_id`, `request_id` e
-`correlation_id` independentes, além de um evento resumido no cliente.
+Duas threads do cliente, sincronizadas por barreira, enviam chamadas IS-Wire
+`navigate` separadas. Cada uma gera `robot_id`, `request_id`, `correlation_id`,
+`goal_id` e horário de envio/conclusão identificáveis. O objetivo de E3 é
+avaliar **concorrência e independência de roteamento**, não proximidade entre
+trajetórias, exatidão de pose ou coordenação física entre robôs.
 
-**Estado científico desta extensão:** implementação e testes automatizados
-disponíveis; **E3 não foi executado na sessão `20261125T155512Z-c38e81`**.
-Portanto, os resultados de E3 não são incluídos nos totais de 52 requisições
-nem declarados como comprovação empírica neste relatório. Após uma execução,
-o respectivo `summary.json`, `wire_requests.jsonl`, `events.jsonl` e os registros
-do Core deverão ser auditados como nova sessão.
+Executar no host Ubuntu, sob supervisão e com área livre:
+
+```bash
+python3 create3_physical_e2e.py \
+  --parallel-goals-only --confirm-area-clear --seed 2027
+```
+
+Esse modo movimenta o Create 3, podendo desacoplar da base, e **não realiza
+docking automático**. Como alternativa, o protocolo completo aceita
+`--execute --confirm-area-clear --ros1-mirror --validate-follow-waypoints
+--validate-parallel-goals --seed 2027` para incluir E3 após os cinco ciclos e
+antes da tentativa final de docking.
+
+**Critério de validação:** o cliente registra horários monotônicos de duas
+requisições sobrepostas, mas isso **não basta** para sustentar que as duas ações
+ROS ocorreram em paralelo. O verificador adicional `verify_e3_overlap.py`
+cruza `wire_requests.jsonl` com `core_bridge_events.jsonl`, exige ambos os
+estados terminais de sucesso e calcula a interseção temporal dos intervalos
+`goal_sent` → `goal_terminal` dos adaptadores ROS 1 e ROS 2, usando o relógio
+monotônico do Core. Somente uma interseção positiva e registros completos
+produzem um `e3_overlap_verification.json` com `status=PASS`.
+
+Uma etapa diagnóstica auxiliar **H1**, já implementada, testa operações de
+tipos diferentes sem movimento (`get_map` no ROS 1 e `get_odometry` no ROS 2):
+
+```bash
+python3 create3_physical_e2e.py --distinct-commands-only --seed 2027
+```
+
+H1 é distinto do E3 e não substitui a evidência de requisições de navegação
+concorrentes. Sua execução antecede automaticamente o movimento no modo
+completo quando `--ros1-mirror` está ativo.
+
+**Estado científico:** E3 e H1 não integraram a execução original
+`20261125T155512Z-c38e81`, cujas contagens e conclusões nas seções anteriores
+permanecem inalteradas. Implementação e testes locais não constituem
+comprovação empírica em hardware. Uma nova sessão, com os arquivos brutos do
+cliente e Core e o verificador E3, deverá ser anexada ao relatório antes de
+declarar a simultaneidade observada.
 
 ---
 

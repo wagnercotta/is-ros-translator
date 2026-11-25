@@ -87,37 +87,93 @@ does not prove simultaneous multi-robot operation, autonomous obstacle
 avoidance, SLAM, or direct ROS 1 ↔ ROS 2 communication. It also does not
 replace a physical operator's safety supervision.
 
-## E3: distinct commands to different ROS backends
+## H1: optional read-only heterogeneous command diagnostic
 
-E1 and E2 use the same semantic navigation contract on ROS 1 and ROS 2. E3
-complements them by exercising **different PrIS operations and ROS mechanisms**
-through the same IS-Wire request channel:
+H1 checks two *different types of operation* over the same PrIS/IS-Wire API:
 
-| Destination | PrIS operation | Backend mechanism | Read-only response check |
+| Destination | PrIS operation | Backend mechanism | Read-only check |
 | --- | --- | --- | --- |
-| `ros1_sim` | `get_map` | ROS 1 `/dynamic_map` service (`nav_msgs/GetMap`) | `OccupancyGrid` dimensions, resolution and cell count |
-| `create_3` | `get_odometry` | ROS 2 `/create3/odom` topic (`nav_msgs/msg/Odometry`) | Valid pose message structure |
-
-The requests have separate `robot_id`, `request_id` and IS-Wire
-`correlation_id`. The client saves both complete request/reply envelopes in
-`wire_requests.jsonl`, and a compact `distinct_commands_verified` event in
-`events.jsonl`. Server-side `request_received` and `reply_prepared` can be
-matched by those IDs in `core_bridge_events.jsonl`.
-
-Run E3 alone **without moving the robot** from the Ubuntu VM, using the same
-`ISWIRE_BROKER_URI` as the other client modes:
+| `ros1_sim` | `get_map` | ROS 1 `/dynamic_map` service (`nav_msgs/GetMap`) | Valid `OccupancyGrid` size and resolution |
+| `create_3` | `get_odometry` | ROS 2 `/create3/odom` topic (`nav_msgs/msg/Odometry`) | Valid pose structure |
 
 ```bash
 python3 create3_physical_e2e.py --distinct-commands-only --seed 2027
 ```
 
-When using `--execute --ros1-mirror`, E3 also runs automatically **before**
-any undock or navigation action. The experimental output reports
-`E3_distinct_commands=PASS` only after valid responses from both backends.
+H1 is automatically performed before motion under `--execute --ros1-mirror`.
+It saves separate `request_id`/`correlation_id` records and reports
+`H1_distinct_commands=PASS`. This diagnostic is **not** the parallel E3 test.
 
-E3 demonstrates heterogeneous operation dispatch to distinct ROS versions,
-not direct ROS 1 ↔ ROS 2 communication. It is a functional check, not a
-measurement of map quality, localisation accuracy or network performance.
+## E3: concurrent different navigation destinations in ROS 1 and ROS 2
+
+E1/E2 demonstrate a *shared* semantic contract using corresponding goals,
+normally executed sequentially across the backends. E3 demonstrates **two
+distinct goals sent concurrently** using that same contract, routed to two
+different robots without serialising the dispatch at the client.
+
+| Backend | PrIS operation | World/floor target (m) | ROS action frame and sent coordinates (m) |
+| --- | --- | --- | --- |
+| ROS 1 simulator (`ros1_sim`) | `navigate` | **(-0.8, +0.6)** | `map`: **(-0.8, +0.6)** via `/move_base` |
+| ROS 2 physical Create 3 (`create_3`) | `navigate` | **(+0.8, -0.6)** | `odom`: **(-0.7, +0.4)** via `/create3/navigate_to_position` |
+
+The ROS 2 odom coordinates result from the **configured** dock offset
+`(1.5, -1.0)` m, not from any claim about navigation accuracy. Custom targets
+are accepted via `--parallel-ros1-x`, `--parallel-ros1-y`,
+`--parallel-ros2-x` and `--parallel-ros2-y`, provided
+they are separated by at least 0.5 m within the configured floor bounds.
+
+On the **Ubuntu host, outside Docker**, with Core/ROSBridge already running,
+the IS-Wire broker URI configured, a physically clear area and a supervisor
+holding a reliable **physical** stop control:
+
+```bash
+# E3 in isolation, with actual Create 3 movement (undocks first if necessary).
+python3 create3_physical_e2e.py \
+  --parallel-goals-only --confirm-area-clear --seed 2027
+
+# Or E3 after E1/E2 in the complete five-loop protocol, before docking.
+python3 create3_physical_e2e.py \
+  --execute --confirm-area-clear --ros1-mirror \
+  --validate-follow-waypoints --validate-parallel-goals --seed 2027
+```
+
+**The isolated E3 run leaves the Create 3 undocked.** Do not perform these
+commands unattended; Create 3 NavigateToPosition does not provide obstacle
+avoidance. The simulator and physical robot do not need to be collocated.
+E3 tests *routing/dispatch*, not geometry or trajectory accuracy.
+
+The client uses two worker threads and a start barrier, and each worker
+creates a separate IS-Wire request/channel. Its `events.jsonl` has
+`parallel_request_started`, `parallel_request_completed`, and
+`parallel_distinct_goals_verified`, with independent IDs and monotonic
+start/end times. `summary.json` distinguishes `E3_concurrent_dispatch=PASS`
+from `E3_backend_action_overlap=NOT_VERIFIED_FROM_CLIENT_ALONE`. **Concurrent
+client RPCs alone do not establish simultaneous ROS actions.**
+
+To corroborate E3 using *Core* evidence from the same run, execute:
+
+```bash
+python3 verify_e3_overlap.py \
+  --client-run "$HOME/rostranslator-create3-results/<RUN_ID>" \
+  --core-evidence "$HOME/rostranslator-evidence/<SESSION_ID>/core_bridge_events.jsonl"
+```
+
+Replace `<RUN_ID>` and `<SESSION_ID>` with actual directories displayed by
+the scripts and Compose evidence mount. The verifier matches the two client
+`request_id`/`correlation_id` values, distinct targets and successful replies
+to `iswire.request_received`, `navigation_goal_prepared`,
+`bridge.action_dispatched`, and each adapter's `goal_sent`/`goal_terminal`.
+Using the **same Core monotonic clock**, it computes:
+
+`overlap = min(goal_terminal_ros1, goal_terminal_ros2) - max(goal_sent_ros1, goal_sent_ros2)`
+
+Only a **strictly positive** interval with both successful backend terminal
+statuses produces `[PASS]` and a saved `e3_overlap_verification.json`. A zero
+or negative interval, incomplete logs or an ID mismatch produces `[FAIL]`.
+This is evidence of overlapping ROS action-client intervals, not necessarily
+simultaneous robot motion at the millisecond level. Preserve all four client
+files plus the Core JSONL for the scientific report. Do not retroactively
+attribute E3 to the earlier 2026-11-25 run, which had sequential goals only.
 
 ## Quick checks
 

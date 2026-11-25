@@ -12,6 +12,8 @@ This client never starts the gateway, Docker, ROSBridge, or a ROS 2 node.
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror --validate-follow-waypoints
   python3 create3_physical_e2e.py --distinct-commands-only
+  python3 create3_physical_e2e.py --parallel-goals-only --confirm-area-clear
+  python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror --validate-parallel-goals
 
 Robot commands use ONLY ROSTranslator.v2.Request and IS-Wire telemetry. No
 rclpy, direct ROSBridge calls, or automatic Docker startup are performed.
@@ -26,6 +28,10 @@ ROS 1 uses world XY directly in map; Create 3 uses translated odom XY.
 The ROS 1 mirror also validates distinct read-only PrIS operations before
 physical movement: ROS 1 get_map (service) and ROS 2 get_odometry (topic).
 Use --distinct-commands-only to run that stage without robot motion.
+With --validate-parallel-goals, after the five loops ROS 1 and ROS 2 each
+receive a *different* navigate target through independent IS-Wire requests,
+dispatched concurrently from two synchronised worker threads. The independent
+--parallel-goals-only mode moves the Create 3 and does not dock it afterwards.
 
 IMPORTANT: Create 3 NavigateToPosition is NOT an obstacle-avoiding planner.
 An operator must supervise the robot and keep a physical stop available.
@@ -34,6 +40,7 @@ An operator must supervise the robot and keep a physical stop available.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import importlib.metadata
 import json
@@ -46,6 +53,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -59,6 +67,8 @@ DOCK_APPROACH_TOLERANCE = 0.075
 REQUEST_TOPIC = "ROSTranslator.v2.Request"
 EVENT_PREFIX = "ROSTranslator.v2.Event"
 DOCK_STATUS_TYPE = "irobot_create_msgs/msg/DockStatus"
+DEFAULT_PARALLEL_ROS1_WORLD = (-0.8, 0.6)
+DEFAULT_PARALLEL_ROS2_WORLD = (0.8, -0.6)
 
 
 class ExperimentError(RuntimeError):
@@ -328,12 +338,15 @@ class Evidence:
         self.output.mkdir(parents=True, exist_ok=False)
         self.log = self.output / "events.jsonl"
         self.wire_log = self.output / "wire_requests.jsonl"
+        self._lock = threading.Lock()
         self.motion_attempted = False
         self.verbose = verbose
         self.requests = []
         self.navigations = {"ros1": 0, "ros2": 0}
         self.waypoint_sequences = {"ros1": 0, "ros2": 0}
         self.distinct_commands_verified = False
+        self.parallel_goals_verified = False
+        self.parallel_results = None
 
     def record_rpc(self, *, request_topic: str, request: dict,
                    correlation_id: str | None, reply: dict | None,
@@ -343,20 +356,22 @@ class Evidence:
                   "request": request, "reply": reply, "duration_ms": duration_ms,
                   "goal_ids_returned": find_goal_ids(reply),
                   "status": "failed" if error else "passed", "error": error}
-        with self.wire_log.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        self.requests.append({"robot_id": request["robot_id"],
-                              "operation": request["operation"],
-                              "correlated": bool(reply is not None and
-                                                 reply.get("request_id") == request["request_id"] and
-                                                 correlation_id is not None),
-                              "goal_ids_returned": record["goal_ids_returned"],
-                              "status": record["status"]})
+        with self._lock:
+            with self.wire_log.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            self.requests.append({"robot_id": request["robot_id"],
+                                  "operation": request["operation"],
+                                  "correlated": bool(reply is not None and
+                                                     reply.get("request_id") == request["request_id"] and
+                                                     correlation_id is not None),
+                                  "goal_ids_returned": record["goal_ids_returned"],
+                                  "status": record["status"]})
 
     def emit(self, kind: str, **values) -> None:
         event = {"at_utc": now_utc(), "kind": kind, **values}
-        with self.log.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        with self._lock:
+            with self.log.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
         if self.verbose:
             print(f"[{event['at_utc']}] {kind}: "
                   + ", ".join(f"{k}={v}" for k, v in values.items() if k != "reply"), flush=True)
@@ -369,14 +384,19 @@ class Evidence:
                 "follow_waypoints_verified":
                     f"[PASS] E2 follow_waypoints | {values.get('robot_id')} | 2/2 goals",
                 "distinct_commands_verified":
-                    "[PASS] E3 distinct operations | ROS1 get_map (service) "
+                    "[PASS] H1 distinct operations | ROS1 get_map (service) "
                     "| ROS2 get_odometry (topic)",
+                "parallel_distinct_goals_verified":
+                    "[PASS] E3 concurrent navigation | different ROS1/ROS2 targets "
+                    f"| client RPC overlap={values.get('rpc_overlap_ms')}ms",
                 "dock_approach_verified": "[PASS] Dock approach verified",
                 "docked_confirmed": "[PASS] Create3 docked (telemetry confirmed)",
                 "docking_warning": f"[WARN] {values.get('detail')}",
                 "experiment_pass":
-                    "[RESULT] E3 distinct-commands validation PASSED"
+                    "[RESULT] H1 distinct-commands validation PASSED"
                     if values.get("mode") == "distinct-commands-only"
+                    else "[RESULT] E3 parallel distinct goals PASSED (not docked)"
+                    if values.get("mode") == "parallel-goals-only"
                     else "[RESULT] Physical experiment PASSED",
                 "experiment_failed": f"[FAIL] {values.get('error')}",
                 "emergency_stop_requested": "[WARN] Emergency stop requested",
@@ -388,7 +408,8 @@ class Evidence:
 
     def validation_results(self, *, ros1_mirror: bool,
                            follow_requested: bool,
-                           distinct_requested: bool = False) -> dict:
+                           distinct_requested: bool = False,
+                           parallel_requested: bool = False) -> dict:
         """Only mark what this client can actually observe; avoid inferred PASS."""
         nav = [r for r in self.requests if r["operation"] == "navigate"]
         seq = [r for r in self.requests if r["operation"] == "follow_waypoints"]
@@ -408,8 +429,12 @@ class Evidence:
             "E2_follow_waypoints_ros2": "PASS" if self.waypoint_sequences["ros2"] else
                                         ("FAIL" if follow_requested and len(seq) >= 2 else
                                          "NOT_EXECUTED"),
-            "E3_distinct_commands": "PASS" if self.distinct_commands_verified else
+            "H1_distinct_commands": "PASS" if self.distinct_commands_verified else
                                      ("FAIL" if distinct_requested else "NOT_EXECUTED"),
+            "E3_concurrent_dispatch": "PASS" if self.parallel_goals_verified else
+                                      ("FAIL" if parallel_requested else "NOT_EXECUTED"),
+            "E3_backend_action_overlap": "NOT_VERIFIED_FROM_CLIENT_ALONE" if
+                                         self.parallel_goals_verified else "NOT_EXECUTED",
             "IS_Wire_request_reply_correlation": "PASS" if correlation else "NOT_VERIFIED",
             "backend_goal_ids": "PASS" if goal_ids else "NOT_AVAILABLE_IN_REPLY",
             "independent_adapter_routing": "NOT_VERIFIED_FROM_CLIENT_ALONE",
@@ -439,14 +464,14 @@ def check_odometry(client: ISWireClient, target: tuple[float, float],
 
 def run_distinct_commands(client: ISWireClient, ros1_client: ISWireClient,
                           evidence: Evidence) -> dict:
-    """E3: exercise different ROS service/topic mechanisms through one PrIS API.
+    """H1 diagnostic: different ROS service/topic mechanisms through one PrIS API.
 
     Both commands are read-only. Neither drives, docks, or undocks the robot.
     The raw correlated RPC replies are preserved by ISWireClient; only compact
     response metadata is emitted to the human-readable experiment event log.
     """
     if ros1_client is None or client.robot_id == ros1_client.robot_id:
-        raise ExperimentError("E3 requires distinct configured ROS1 and ROS2 robot IDs")
+        raise ExperimentError("H1 requires distinct configured ROS1 and ROS2 robot IDs")
     evidence.emit("distinct_commands_started", operations=[
         {"robot_id": ros1_client.robot_id, "operation": "get_map", "endpoint": "/dynamic_map"},
         {"robot_id": client.robot_id, "operation": "get_odometry", "endpoint": "/create3/odom"},
@@ -465,7 +490,7 @@ def run_distinct_commands(client: ISWireClient, ros1_client: ISWireClient,
                 or not math.isfinite(resolution) or resolution <= 0):
             raise ValueError("invalid map dimensions or resolution")
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise ExperimentError("E3 ROS1 get_map returned an invalid OccupancyGrid") from exc
+        raise ExperimentError("H1 ROS1 get_map returned an invalid OccupancyGrid") from exc
     evidence.emit("distinct_command_response", robot_id=ros1_client.robot_id,
                   operation="get_map", endpoint="/dynamic_map",
                   ros_type="nav_msgs/GetMap", request_id=map_reply["request_id"],
@@ -475,7 +500,7 @@ def run_distinct_commands(client: ISWireClient, ros1_client: ISWireClient,
     # Validate the message structure, not its coordinates or positioning error.
     odometry_pose(odom_reply)
     if map_reply["request_id"] == odom_reply["request_id"]:
-        raise ExperimentError("E3 expected distinct request IDs for independent commands")
+        raise ExperimentError("H1 expected distinct request IDs for independent commands")
     evidence.emit("distinct_command_response", robot_id=client.robot_id,
                   operation="get_odometry", endpoint="/create3/odom",
                   ros_type="nav_msgs/msg/Odometry", request_id=odom_reply["request_id"],
@@ -494,6 +519,105 @@ def run_distinct_commands(client: ISWireClient, ros1_client: ISWireClient,
         "ros2": {"robot_id": client.robot_id, "operation": "get_odometry",
                  "request_id": odom_reply["request_id"], "pose_received": True},
     }}
+
+
+def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
+                                evidence: Evidence, *,
+                                ros1_world: tuple[float, float],
+                                ros2_world: tuple[float, float],
+                                dock_world: tuple[float, float],
+                                yaw: float, timeout: float) -> dict:
+    """E3: dispatch different navigation goals concurrently to ROS1 and ROS2.
+
+    Two independent IS-Wire channels are created by the respective client
+    request calls. The barrier synchronises *client dispatch*, not robot
+    action acceptance. Actual server-side overlap is auditable through the
+    Core's goal_sent/goal_terminal monotonic timestamps for these request IDs.
+    """
+    if ros1_client is None or client.robot_id == ros1_client.robot_id:
+        raise ExperimentError("E3 requires distinct ROS1 and ROS2 robot IDs")
+    if (not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
+                for v in (*ros1_world, *ros2_world))
+            or math.dist(ros1_world, ros2_world) < 0.5):
+        raise ExperimentError("E3 requires distinct targets at least 0.5m apart "
+                              "within the physical +/-1.2m test area")
+
+    ros2_odom = world_to_odom(ros2_world, dock_world)
+    ros1_args = {"position": {"x": ros1_world[0], "y": ros1_world[1], "z": 0.0},
+                 "yaw": yaw, "frame_id": "map"}
+    ros2_args = {"position": {"x": ros2_odom[0], "y": ros2_odom[1], "z": 0.0},
+                 "yaw": yaw, "frame_id": "odom"}
+    evidence.emit("parallel_distinct_goals_started", ros1_robot_id=ros1_client.robot_id,
+                  ros2_robot_id=client.robot_id, ros1_target_world=ros1_world,
+                  ros2_target_world=ros2_world, ros2_target_odom=ros2_odom,
+                  operation="navigate", independent_requests=True)
+
+    barrier = threading.Barrier(3)
+
+    def issue_goal(target_client, args, target_world, *, expected_status, physical):
+        try:
+            barrier.wait(timeout=15)
+        except threading.BrokenBarrierError as exc:
+            raise ExperimentError("E3 parallel dispatch barrier failed") from exc
+        started = time.monotonic_ns()
+        evidence.emit("parallel_request_started", robot_id=target_client.robot_id,
+                      operation="navigate", rpc_start_monotonic_ns=started,
+                      target_world=target_world, target_backend=args["position"],
+                      frame_id=args["frame_id"])
+        try:
+            response = send_action(target_client, evidence, "navigate", args, timeout,
+                                   expected_status=expected_status,
+                                   physical_motion=physical)
+        except BaseException as exc:
+            evidence.emit("parallel_request_failed", robot_id=target_client.robot_id,
+                          rpc_end_monotonic_ns=time.monotonic_ns(),
+                          error=f"{type(exc).__name__}: {exc}")
+            raise
+        ended = time.monotonic_ns()
+        goal_id = response["result"].get("goal_id")
+        evidence.emit("parallel_request_completed", robot_id=target_client.robot_id,
+                      operation="navigate", rpc_start_monotonic_ns=started,
+                      rpc_end_monotonic_ns=ended,
+                      request_id=response["request_id"], goal_id=goal_id,
+                      terminal_status=response["result"]["status"])
+        return {"robot_id": target_client.robot_id, "request_id": response["request_id"],
+                "goal_id": goal_id, "terminal_status": response["result"]["status"],
+                "rpc_start_monotonic_ns": started, "rpc_end_monotonic_ns": ended,
+                "target_world": [*target_world], "target_backend": args["position"],
+                "frame_id": args["frame_id"]}
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="e3-ros") as executor:
+        ros1_future = executor.submit(issue_goal, ros1_client, ros1_args, ros1_world,
+                                      expected_status=3, physical=False)
+        ros2_future = executor.submit(issue_goal, client, ros2_args, ros2_world,
+                                      expected_status=4, physical=True)
+        try:
+            barrier.wait(timeout=15)
+        except threading.BrokenBarrierError as exc:
+            raise ExperimentError("E3 could not start both workers") from exc
+        ros1_result = ros1_future.result()
+        ros2_result = ros2_future.result()
+
+    if ros1_result["request_id"] == ros2_result["request_id"]:
+        raise ExperimentError("E3 expected independent ROS1/ROS2 request IDs")
+    overlap_ns = min(ros1_result["rpc_end_monotonic_ns"],
+                     ros2_result["rpc_end_monotonic_ns"]) - max(
+                         ros1_result["rpc_start_monotonic_ns"],
+                         ros2_result["rpc_start_monotonic_ns"])
+    if overlap_ns <= 0:
+        raise ExperimentError("E3 client IS-Wire requests did not overlap")
+
+    evidence.parallel_goals_verified = True
+    overlap_ms = round(overlap_ns / 1_000_000, 3)
+    evidence.emit("parallel_distinct_goals_verified",
+                  ros1_request_id=ros1_result["request_id"],
+                  ros2_request_id=ros2_result["request_id"],
+                  rpc_overlap_ms=overlap_ms,
+                  server_action_overlap="NOT_VERIFIED_FROM_CLIENT_ALONE")
+    return {"parallel_distinct_goals": {"ros1": ros1_result, "ros2": ros2_result,
+                                        "client_rpc_overlap_ms": overlap_ms,
+                                        "server_action_overlap":
+                                            "NOT_VERIFIED_FROM_CLIENT_ALONE"}}
 
 
 def send_action(client: ISWireClient, evidence: Evidence, action: str,
@@ -579,7 +703,8 @@ def run_mission(client: ISWireClient, evidence: Evidence, *, waypoints: list[tup
                 dock_world: tuple[float, float], action_timeout: float, status_timeout: float,
                 tolerance: float, dock_approach_distance: float,
                 ros1_client: ISWireClient | None = None,
-                validate_follow_waypoints: bool = False) -> dict:
+                validate_follow_waypoints: bool = False,
+                parallel_targets: tuple[tuple[float, float], tuple[float, float]] | None = None) -> dict:
     # The dock approach is a separate final operation, never a sixth random
     # waypoint; every loop also returns to the world origin by design.
     if len(waypoints) != LOOPS:
@@ -626,6 +751,12 @@ def run_mission(client: ISWireClient, evidence: Evidence, *, waypoints: list[tup
                  yaw=yaw, timeout=action_timeout, tolerance=tolerance,
                  ros1_client=ros1_client)
         evidence.emit("loop_pass", index=index)
+
+    if parallel_targets is not None:
+        evidence.parallel_results = run_parallel_distinct_goals(
+            client, ros1_client, evidence, ros1_world=parallel_targets[0],
+            ros2_world=parallel_targets[1], dock_world=dock_world,
+            yaw=yaw, timeout=action_timeout)
 
     state = approach_and_dock(client, evidence, dock_world=dock_world, yaw=yaw,
                               action_timeout=action_timeout, status_timeout=status_timeout,
@@ -725,7 +856,9 @@ def argument_parser() -> argparse.ArgumentParser:
     run.add_argument("--dock-only", action="store_true",
                      help="Navigate to odom (-0.2,0), then dock; skip all five loops")
     run.add_argument("--distinct-commands-only", action="store_true",
-                     help="Run only E3: ROS1 get_map and ROS2 get_odometry over IS-Wire, without motion")
+                     help="Run only H1 diagnostic: ROS1 get_map and ROS2 get_odometry, without motion")
+    run.add_argument("--parallel-goals-only", action="store_true",
+                     help="Run E3 only: concurrent distinct navigation goals in ROS1 and ROS2; moves Create3")
     parser.add_argument("--confirm-area-clear", action="store_true",
                         help="Confirm a supervised, obstacle-free 2.4m x 2.4m area "
                              "plus robot clearance, dock, and travel paths")
@@ -737,6 +870,13 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validate-follow-waypoints", action="store_true",
                         help="In loop 5, replace its two navigate calls with ONE 2-goal "
                              "follow_waypoints request per backend; requires --execute --ros1-mirror")
+    parser.add_argument("--validate-parallel-goals", action="store_true",
+                        help="After five loops, dispatch distinct ROS1/ROS2 navigate goals concurrently; "
+                             "requires --execute --ros1-mirror")
+    parser.add_argument("--parallel-ros1-x", type=float, default=DEFAULT_PARALLEL_ROS1_WORLD[0])
+    parser.add_argument("--parallel-ros1-y", type=float, default=DEFAULT_PARALLEL_ROS1_WORLD[1])
+    parser.add_argument("--parallel-ros2-x", type=float, default=DEFAULT_PARALLEL_ROS2_WORLD[0])
+    parser.add_argument("--parallel-ros2-y", type=float, default=DEFAULT_PARALLEL_ROS2_WORLD[1])
     parser.add_argument("--verbose", action="store_true",
                         help="Show every event on the terminal; detailed evidence is always saved")
     parser.add_argument("--dock-topic", default="/create3/dock_status",
@@ -766,8 +906,8 @@ def argument_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = argument_parser()
     args = parser.parse_args(argv)
-    if (args.execute or args.dock_only) and not args.confirm_area_clear:
-        parser.error("--execute and --dock-only require --confirm-area-clear and physical supervision")
+    if (args.execute or args.dock_only or args.parallel_goals_only) and not args.confirm_area_clear:
+        parser.error("Physical movement requires --confirm-area-clear and physical supervision")
     dock_world = (args.dock_world_x, args.dock_world_y)
     if not all(math.isfinite(v) for v in dock_world):
         parser.error("Dock floor coordinates must be finite")
@@ -781,11 +921,19 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--dock-approach-distance must be within [0.15,0.35] metres")
     if not args.robot_id or not args.dock_topic.startswith("/"):
         parser.error("--robot-id and an absolute --dock-topic are required")
-    if (args.ros1_mirror or args.distinct_commands_only) and (
+    if (args.ros1_mirror or args.distinct_commands_only or args.parallel_goals_only) and (
             not args.ros1_robot_id or args.ros1_robot_id == args.robot_id):
         parser.error("--ros1-robot-id must identify a different, configured ROS 1 robot")
     if args.validate_follow_waypoints and (not args.execute or not args.ros1_mirror):
         parser.error("--validate-follow-waypoints requires --execute --ros1-mirror")
+    if args.validate_parallel_goals and (not args.execute or not args.ros1_mirror):
+        parser.error("--validate-parallel-goals requires --execute --ros1-mirror")
+    ros1_parallel = (args.parallel_ros1_x, args.parallel_ros1_y)
+    ros2_parallel = (args.parallel_ros2_x, args.parallel_ros2_y)
+    if (not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
+                for v in (*ros1_parallel, *ros2_parallel))
+            or math.dist(ros1_parallel, ros2_parallel) < 0.5):
+        parser.error("Parallel destinations must be >=0.5m apart, inside +/-1.2m on each axis")
 
     seed = args.seed if args.seed is not None else secrets.randbits(31)
     points_world = random_waypoints(seed)
@@ -796,7 +944,9 @@ def main(argv: list[str] | None = None) -> int:
     approach_odom = dock_approach_odom(args.dock_approach_distance)
     approach_world = odom_to_world(approach_odom, dock_world)
     read_only = args.distinct_commands_only
-    plan = {"seed": seed, "loops": 0 if args.dock_only or read_only else LOOPS,
+    parallel_only = args.parallel_goals_only
+    parallel_enabled = args.validate_parallel_goals or parallel_only
+    plan = {"seed": seed, "loops": 0 if args.dock_only or read_only or parallel_only else LOOPS,
             "coordinate_frame": "physical_floor",
             "world_bounds_m": [-COORD_LIMIT, COORD_LIMIT],
             "dock_world_xy_m": [*dock_world],
@@ -807,19 +957,25 @@ def main(argv: list[str] | None = None) -> int:
             "dock_approach_world_xy_m": [*approach_world],
             "dock_approach_odom_xy_m": [*approach_odom],
             "ros1_mirror_enabled": args.ros1_mirror,
+            "ros1_parallel_enabled": parallel_enabled,
             "validate_follow_waypoints": args.validate_follow_waypoints,
             "validate_distinct_commands": (args.ros1_mirror and args.execute) or read_only,
-            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror or read_only else None,
-            "ros1_navigation_frame": "map" if args.ros1_mirror else None,
+            "validate_parallel_goals": parallel_enabled,
+            "parallel_ros1_world_xy_m": [*ros1_parallel] if parallel_enabled else None,
+            "parallel_ros2_world_xy_m": [*ros2_parallel] if parallel_enabled else None,
+            "parallel_ros2_odom_xy_m": [*world_to_odom(ros2_parallel, dock_world)] if parallel_enabled else None,
+            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror or read_only or parallel_only else None,
+            "ros1_navigation_frame": "map" if args.ros1_mirror or parallel_only else None,
             "waypoints": [
                 {"loop": i, "random_world_xy_m": [*point],
                  "random_odom_xy_m": [*world_to_odom(point, dock_world)],
                  "return_world_xy_m": [*WORLD_ORIGIN],
                  "return_odom_xy_m": [*return_odom]}
-                for i, point in enumerate(points_world, 1)] if not args.dock_only and not read_only else [],
-            "final_actions": [] if read_only else ["navigate_to_dock_approach", "dock"],
+                for i, point in enumerate(points_world, 1)]
+                if not args.dock_only and not read_only and not parallel_only else [],
+            "final_actions": [] if read_only or parallel_only else ["navigate_to_dock_approach", "dock"],
             "robot_id": args.robot_id}
-    if not args.execute and not args.check_only and not args.dock_only and not read_only:
+    if not args.execute and not args.check_only and not args.dock_only and not read_only and not parallel_only:
         print(json.dumps({"mode": "DRY_RUN (NO robot communication)", **plan}, indent=2))
         return 0
     if not args.broker_uri:
@@ -832,13 +988,14 @@ def main(argv: list[str] | None = None) -> int:
     summary = {"run_id": run_id, "start_utc": now_utc(), "status": "running",
                "mode": "check-only" if args.check_only else
                        ("dock-only" if args.dock_only else
-                        ("distinct-commands-only" if read_only else "physical-e2e")),
+                        ("distinct-commands-only" if read_only else
+                         ("parallel-goals-only" if parallel_only else "physical-e2e"))),
                "provenance": provenance(), **plan}
     client = ISWireClient(args.broker_uri, args.robot_id, args.dock_topic,
                           evidence=evidence)
     ros1_client = (ISWireClient(args.broker_uri, args.ros1_robot_id, args.dock_topic,
                                 evidence=evidence)
-                   if args.ros1_mirror or read_only else None)
+                   if args.ros1_mirror or read_only or parallel_only else None)
     try:
         evidence.emit("started", mode=summary["mode"], seed=seed,
                       robot_id=args.robot_id, dock_world=dock_world)
@@ -848,6 +1005,20 @@ def main(argv: list[str] | None = None) -> int:
             summary["dock_status"] = state
         elif read_only:
             summary.update(run_distinct_commands(client, ros1_client, evidence))
+        elif parallel_only:
+            evidence.emit("physical_supervision_confirmed", acknowledged=True)
+            initial = client.dock_status(timeout=args.status_timeout)
+            evidence.emit("initial_dock_status", **initial)
+            if initial["is_docked"]:
+                send_action(client, evidence, "undock", {}, args.action_timeout)
+                evidence.emit("undocked_confirmed",
+                              **client.dock_status(expected=False, timeout=args.status_timeout))
+            _, _, yaw = odometry_pose(client.request("get_odometry", timeout=15))
+            evidence.parallel_results = run_parallel_distinct_goals(
+                client, ros1_client, evidence, ros1_world=ros1_parallel,
+                ros2_world=ros2_parallel, dock_world=dock_world,
+                yaw=yaw, timeout=args.action_timeout)
+            summary.update(evidence.parallel_results)
         elif args.dock_only:
             evidence.emit("physical_supervision_confirmed", acknowledged=True)
             summary.update(run_dock_only(client, evidence, dock_world=dock_world,
@@ -866,7 +1037,9 @@ def main(argv: list[str] | None = None) -> int:
                                        tolerance=args.position_tolerance,
                                        dock_approach_distance=args.dock_approach_distance,
                                        ros1_client=ros1_client,
-                                       validate_follow_waypoints=args.validate_follow_waypoints))
+                                       validate_follow_waypoints=args.validate_follow_waypoints,
+                                       parallel_targets=(ros1_parallel, ros2_parallel)
+                                       if args.validate_parallel_goals else None))
         summary["status"] = "passed"
         evidence.emit("experiment_pass", mode=summary["mode"])
         return 0
@@ -879,24 +1052,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAILED: {summary['error']}", file=sys.stderr)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
     finally:
+        if evidence.parallel_results is not None:
+            summary.update(evidence.parallel_results)
         summary["validation"] = evidence.validation_results(
             ros1_mirror=args.ros1_mirror,
             follow_requested=args.validate_follow_waypoints,
-            distinct_requested=(args.ros1_mirror and args.execute) or read_only)
+            distinct_requested=(args.ros1_mirror and args.execute) or read_only,
+            parallel_requested=parallel_enabled)
         summary["observability_limits"] = [
             "IS-Wire correlation and backend odometry are observed by the client; "
             "adapter forwarding needs independently captured Core/bridge logs.",
             "Goal IDs are reported only when actually present in the PrIS response.",
             "E2 outcome ordering is returned by the Core, not independently timestamped "
             "by each ROS action server.",
+            "E3 client RPC overlap does not prove simultaneous ROS action execution; "
+            "run verify_e3_overlap.py with Core goal_sent/goal_terminal records.",
         ]
         summary["finished_at_utc"] = now_utc()
         evidence.finish(summary)
-        if (args.execute and args.ros1_mirror) or read_only:
+        if (args.execute and args.ros1_mirror) or read_only or parallel_only:
             print("[VALIDATION] " + " | ".join(
                 f"{key}={value}" for key, value in summary["validation"].items()
                 if key.startswith("E1_") or key.startswith("E2_")
-                or key.startswith("E3_")), flush=True)
+                or key.startswith("E3_") or key.startswith("H1_")), flush=True)
         print(f"Evidence: {evidence.output}", flush=True)
 
 
