@@ -87,6 +87,38 @@ does not prove simultaneous multi-robot operation, autonomous obstacle
 avoidance, SLAM, or direct ROS 1 ↔ ROS 2 communication. It also does not
 replace a physical operator's safety supervision.
 
+## E3: distinct commands to different ROS backends
+
+E1 and E2 use the same semantic navigation contract on ROS 1 and ROS 2. E3
+complements them by exercising **different PrIS operations and ROS mechanisms**
+through the same IS-Wire request channel:
+
+| Destination | PrIS operation | Backend mechanism | Read-only response check |
+| --- | --- | --- | --- |
+| `ros1_sim` | `get_map` | ROS 1 `/dynamic_map` service (`nav_msgs/GetMap`) | `OccupancyGrid` dimensions, resolution and cell count |
+| `create_3` | `get_odometry` | ROS 2 `/create3/odom` topic (`nav_msgs/msg/Odometry`) | Valid pose message structure |
+
+The requests have separate `robot_id`, `request_id` and IS-Wire
+`correlation_id`. The client saves both complete request/reply envelopes in
+`wire_requests.jsonl`, and a compact `distinct_commands_verified` event in
+`events.jsonl`. Server-side `request_received` and `reply_prepared` can be
+matched by those IDs in `core_bridge_events.jsonl`.
+
+Run E3 alone **without moving the robot** from the Ubuntu VM, using the same
+`ISWIRE_BROKER_URI` as the other client modes:
+
+```bash
+python3 create3_physical_e2e.py --distinct-commands-only --seed 2027
+```
+
+When using `--execute --ros1-mirror`, E3 also runs automatically **before**
+any undock or navigation action. The experimental output reports
+`E3_distinct_commands=PASS` only after valid responses from both backends.
+
+E3 demonstrates heterogeneous operation dispatch to distinct ROS versions,
+not direct ROS 1 ↔ ROS 2 communication. It is a functional check, not a
+measurement of map quality, localisation accuracy or network performance.
+
 ## Quick checks
 
 If `jq` is installed:

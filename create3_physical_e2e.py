@@ -11,6 +11,7 @@ This client never starts the gateway, Docker, ROSBridge, or a ROS 2 node.
   python3 create3_physical_e2e.py --dock-only --confirm-area-clear
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror --validate-follow-waypoints
+  python3 create3_physical_e2e.py --distinct-commands-only
 
 Robot commands use ONLY ROSTranslator.v2.Request and IS-Wire telemetry. No
 rclpy, direct ROSBridge calls, or automatic Docker startup are performed.
@@ -22,6 +23,9 @@ odom_xy = floor_xy - dock_floor_xy.
 Optional --ros1-mirror sends every navigation waypoint first to a separate
 ROS 1 /move_base simulator via the SAME IS-Wire translator, then to Create 3.
 ROS 1 uses world XY directly in map; Create 3 uses translated odom XY.
+The ROS 1 mirror also validates distinct read-only PrIS operations before
+physical movement: ROS 1 get_map (service) and ROS 2 get_odometry (topic).
+Use --distinct-commands-only to run that stage without robot motion.
 
 IMPORTANT: Create 3 NavigateToPosition is NOT an obstacle-avoiding planner.
 An operator must supervise the robot and keep a physical stop available.
@@ -329,6 +333,7 @@ class Evidence:
         self.requests = []
         self.navigations = {"ros1": 0, "ros2": 0}
         self.waypoint_sequences = {"ros1": 0, "ros2": 0}
+        self.distinct_commands_verified = False
 
     def record_rpc(self, *, request_topic: str, request: dict,
                    correlation_id: str | None, reply: dict | None,
@@ -363,10 +368,16 @@ class Evidence:
                 "loop_pass": f"[PASS] Loop {values.get('index')}/{LOOPS}",
                 "follow_waypoints_verified":
                     f"[PASS] E2 follow_waypoints | {values.get('robot_id')} | 2/2 goals",
+                "distinct_commands_verified":
+                    "[PASS] E3 distinct operations | ROS1 get_map (service) "
+                    "| ROS2 get_odometry (topic)",
                 "dock_approach_verified": "[PASS] Dock approach verified",
                 "docked_confirmed": "[PASS] Create3 docked (telemetry confirmed)",
                 "docking_warning": f"[WARN] {values.get('detail')}",
-                "experiment_pass": "[RESULT] Physical experiment PASSED",
+                "experiment_pass":
+                    "[RESULT] E3 distinct-commands validation PASSED"
+                    if values.get("mode") == "distinct-commands-only"
+                    else "[RESULT] Physical experiment PASSED",
                 "experiment_failed": f"[FAIL] {values.get('error')}",
                 "emergency_stop_requested": "[WARN] Emergency stop requested",
                 "emergency_stop_unavailable": "[WARN] Emergency stop unavailable",
@@ -376,14 +387,18 @@ class Evidence:
                 print(compact, flush=True)
 
     def validation_results(self, *, ros1_mirror: bool,
-                           follow_requested: bool) -> dict:
+                           follow_requested: bool,
+                           distinct_requested: bool = False) -> dict:
         """Only mark what this client can actually observe; avoid inferred PASS."""
         nav = [r for r in self.requests if r["operation"] == "navigate"]
         seq = [r for r in self.requests if r["operation"] == "follow_waypoints"]
-        relevant = nav + seq
+        distinct = [r for r in self.requests if r["operation"] in
+                    ("get_map", "get_odometry")]
+        goal_relevant = nav + seq
+        relevant = goal_relevant + distinct
         correlation = bool(relevant) and all(r["correlated"] and r["status"] == "passed"
                                                   for r in relevant)
-        goal_ids = bool(relevant) and all(r["goal_ids_returned"] for r in relevant)
+        goal_ids = bool(goal_relevant) and all(r["goal_ids_returned"] for r in goal_relevant)
         return {
             "E1_navigate_ros1": "PASS" if self.navigations["ros1"] else
                                 ("NOT_EXECUTED" if not ros1_mirror or not nav else "NOT_VERIFIED"),
@@ -393,6 +408,8 @@ class Evidence:
             "E2_follow_waypoints_ros2": "PASS" if self.waypoint_sequences["ros2"] else
                                         ("FAIL" if follow_requested and len(seq) >= 2 else
                                          "NOT_EXECUTED"),
+            "E3_distinct_commands": "PASS" if self.distinct_commands_verified else
+                                     ("FAIL" if distinct_requested else "NOT_EXECUTED"),
             "IS_Wire_request_reply_correlation": "PASS" if correlation else "NOT_VERIFIED",
             "backend_goal_ids": "PASS" if goal_ids else "NOT_AVAILABLE_IN_REPLY",
             "independent_adapter_routing": "NOT_VERIFIED_FROM_CLIENT_ALONE",
@@ -418,6 +435,65 @@ def check_odometry(client: ISWireClient, target: tuple[float, float],
             raise ExperimentError(f"Robot is {error:.3f}m from requested odom target "
                                   f"{target}; tolerance={tolerance:.3f}m; last pose={latest}")
         time.sleep(0.4)
+
+
+def run_distinct_commands(client: ISWireClient, ros1_client: ISWireClient,
+                          evidence: Evidence) -> dict:
+    """E3: exercise different ROS service/topic mechanisms through one PrIS API.
+
+    Both commands are read-only. Neither drives, docks, or undocks the robot.
+    The raw correlated RPC replies are preserved by ISWireClient; only compact
+    response metadata is emitted to the human-readable experiment event log.
+    """
+    if ros1_client is None or client.robot_id == ros1_client.robot_id:
+        raise ExperimentError("E3 requires distinct configured ROS1 and ROS2 robot IDs")
+    evidence.emit("distinct_commands_started", operations=[
+        {"robot_id": ros1_client.robot_id, "operation": "get_map", "endpoint": "/dynamic_map"},
+        {"robot_id": client.robot_id, "operation": "get_odometry", "endpoint": "/create3/odom"},
+    ])
+
+    map_reply = ros1_client.request("get_map", timeout=30)
+    try:
+        grid = map_reply["result"]["map"]
+        info = grid["info"]
+        width = int(info["width"])
+        height = int(info["height"])
+        resolution = float(info["resolution"])
+        cells = grid["data"]
+        if (float(info["width"]) != width or float(info["height"]) != height
+                or width <= 0 or height <= 0 or width * height != len(cells)
+                or not math.isfinite(resolution) or resolution <= 0):
+            raise ValueError("invalid map dimensions or resolution")
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ExperimentError("E3 ROS1 get_map returned an invalid OccupancyGrid") from exc
+    evidence.emit("distinct_command_response", robot_id=ros1_client.robot_id,
+                  operation="get_map", endpoint="/dynamic_map",
+                  ros_type="nav_msgs/GetMap", request_id=map_reply["request_id"],
+                  width=width, height=height, resolution=resolution, cells=len(cells))
+
+    odom_reply = client.request("get_odometry", timeout=20)
+    # Validate the message structure, not its coordinates or positioning error.
+    odometry_pose(odom_reply)
+    if map_reply["request_id"] == odom_reply["request_id"]:
+        raise ExperimentError("E3 expected distinct request IDs for independent commands")
+    evidence.emit("distinct_command_response", robot_id=client.robot_id,
+                  operation="get_odometry", endpoint="/create3/odom",
+                  ros_type="nav_msgs/msg/Odometry", request_id=odom_reply["request_id"],
+                  pose_received=True)
+
+    evidence.distinct_commands_verified = True
+    evidence.emit("distinct_commands_verified", ros1_operation="get_map",
+                  ros2_operation="get_odometry", ros1_robot_id=ros1_client.robot_id,
+                  ros2_robot_id=client.robot_id,
+                  ros1_request_id=map_reply["request_id"],
+                  ros2_request_id=odom_reply["request_id"])
+    return {"distinct_commands": {
+        "ros1": {"robot_id": ros1_client.robot_id, "operation": "get_map",
+                 "request_id": map_reply["request_id"], "map_width": width,
+                 "map_height": height, "map_cells": len(cells)},
+        "ros2": {"robot_id": client.robot_id, "operation": "get_odometry",
+                 "request_id": odom_reply["request_id"], "pose_received": True},
+    }}
 
 
 def send_action(client: ISWireClient, evidence: Evidence, action: str,
@@ -648,6 +724,8 @@ def argument_parser() -> argparse.ArgumentParser:
     run.add_argument("--check-only", action="store_true", help="Read physical dock status only")
     run.add_argument("--dock-only", action="store_true",
                      help="Navigate to odom (-0.2,0), then dock; skip all five loops")
+    run.add_argument("--distinct-commands-only", action="store_true",
+                     help="Run only E3: ROS1 get_map and ROS2 get_odometry over IS-Wire, without motion")
     parser.add_argument("--confirm-area-clear", action="store_true",
                         help="Confirm a supervised, obstacle-free 2.4m x 2.4m area "
                              "plus robot clearance, dock, and travel paths")
@@ -703,7 +781,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--dock-approach-distance must be within [0.15,0.35] metres")
     if not args.robot_id or not args.dock_topic.startswith("/"):
         parser.error("--robot-id and an absolute --dock-topic are required")
-    if args.ros1_mirror and (not args.ros1_robot_id or args.ros1_robot_id == args.robot_id):
+    if (args.ros1_mirror or args.distinct_commands_only) and (
+            not args.ros1_robot_id or args.ros1_robot_id == args.robot_id):
         parser.error("--ros1-robot-id must identify a different, configured ROS 1 robot")
     if args.validate_follow_waypoints and (not args.execute or not args.ros1_mirror):
         parser.error("--validate-follow-waypoints requires --execute --ros1-mirror")
@@ -716,7 +795,8 @@ def main(argv: list[str] | None = None) -> int:
     return_odom = world_to_odom(WORLD_ORIGIN, dock_world)
     approach_odom = dock_approach_odom(args.dock_approach_distance)
     approach_world = odom_to_world(approach_odom, dock_world)
-    plan = {"seed": seed, "loops": 0 if args.dock_only else LOOPS,
+    read_only = args.distinct_commands_only
+    plan = {"seed": seed, "loops": 0 if args.dock_only or read_only else LOOPS,
             "coordinate_frame": "physical_floor",
             "world_bounds_m": [-COORD_LIMIT, COORD_LIMIT],
             "dock_world_xy_m": [*dock_world],
@@ -728,17 +808,18 @@ def main(argv: list[str] | None = None) -> int:
             "dock_approach_odom_xy_m": [*approach_odom],
             "ros1_mirror_enabled": args.ros1_mirror,
             "validate_follow_waypoints": args.validate_follow_waypoints,
-            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror else None,
+            "validate_distinct_commands": (args.ros1_mirror and args.execute) or read_only,
+            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror or read_only else None,
             "ros1_navigation_frame": "map" if args.ros1_mirror else None,
             "waypoints": [
                 {"loop": i, "random_world_xy_m": [*point],
                  "random_odom_xy_m": [*world_to_odom(point, dock_world)],
                  "return_world_xy_m": [*WORLD_ORIGIN],
                  "return_odom_xy_m": [*return_odom]}
-                for i, point in enumerate(points_world, 1)] if not args.dock_only else [],
-            "final_actions": ["navigate_to_dock_approach", "dock"],
+                for i, point in enumerate(points_world, 1)] if not args.dock_only and not read_only else [],
+            "final_actions": [] if read_only else ["navigate_to_dock_approach", "dock"],
             "robot_id": args.robot_id}
-    if not args.execute and not args.check_only and not args.dock_only:
+    if not args.execute and not args.check_only and not args.dock_only and not read_only:
         print(json.dumps({"mode": "DRY_RUN (NO robot communication)", **plan}, indent=2))
         return 0
     if not args.broker_uri:
@@ -750,13 +831,14 @@ def main(argv: list[str] | None = None) -> int:
     # Never write the broker URI: it may contain credentials.
     summary = {"run_id": run_id, "start_utc": now_utc(), "status": "running",
                "mode": "check-only" if args.check_only else
-                       ("dock-only" if args.dock_only else "physical-e2e"),
+                       ("dock-only" if args.dock_only else
+                        ("distinct-commands-only" if read_only else "physical-e2e")),
                "provenance": provenance(), **plan}
     client = ISWireClient(args.broker_uri, args.robot_id, args.dock_topic,
                           evidence=evidence)
     ros1_client = (ISWireClient(args.broker_uri, args.ros1_robot_id, args.dock_topic,
                                 evidence=evidence)
-                   if args.ros1_mirror else None)
+                   if args.ros1_mirror or read_only else None)
     try:
         evidence.emit("started", mode=summary["mode"], seed=seed,
                       robot_id=args.robot_id, dock_world=dock_world)
@@ -764,6 +846,8 @@ def main(argv: list[str] | None = None) -> int:
             state = client.dock_status(timeout=args.status_timeout)
             evidence.emit("dock_status", **state)
             summary["dock_status"] = state
+        elif read_only:
+            summary.update(run_distinct_commands(client, ros1_client, evidence))
         elif args.dock_only:
             evidence.emit("physical_supervision_confirmed", acknowledged=True)
             summary.update(run_dock_only(client, evidence, dock_world=dock_world,
@@ -774,6 +858,8 @@ def main(argv: list[str] | None = None) -> int:
                                          ros1_client=ros1_client))
         else:
             evidence.emit("physical_supervision_confirmed", acknowledged=True)
+            if args.ros1_mirror:
+                summary.update(run_distinct_commands(client, ros1_client, evidence))
             summary.update(run_mission(client, evidence, waypoints=points_world,
                                        dock_world=dock_world, action_timeout=args.action_timeout,
                                        status_timeout=args.status_timeout,
@@ -782,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
                                        ros1_client=ros1_client,
                                        validate_follow_waypoints=args.validate_follow_waypoints))
         summary["status"] = "passed"
-        evidence.emit("experiment_pass")
+        evidence.emit("experiment_pass", mode=summary["mode"])
         return 0
     except (Exception, KeyboardInterrupt) as exc:
         summary["status"] = "failed"
@@ -795,7 +881,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         summary["validation"] = evidence.validation_results(
             ros1_mirror=args.ros1_mirror,
-            follow_requested=args.validate_follow_waypoints)
+            follow_requested=args.validate_follow_waypoints,
+            distinct_requested=(args.ros1_mirror and args.execute) or read_only)
         summary["observability_limits"] = [
             "IS-Wire correlation and backend odometry are observed by the client; "
             "adapter forwarding needs independently captured Core/bridge logs.",
@@ -805,10 +892,11 @@ def main(argv: list[str] | None = None) -> int:
         ]
         summary["finished_at_utc"] = now_utc()
         evidence.finish(summary)
-        if args.execute and args.ros1_mirror:
+        if (args.execute and args.ros1_mirror) or read_only:
             print("[VALIDATION] " + " | ".join(
                 f"{key}={value}" for key, value in summary["validation"].items()
-                if key.startswith("E1_") or key.startswith("E2_")), flush=True)
+                if key.startswith("E1_") or key.startswith("E2_")
+                or key.startswith("E3_")), flush=True)
         print(f"Evidence: {evidence.output}", flush=True)
 
 

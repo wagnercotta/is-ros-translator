@@ -189,6 +189,30 @@ Os dados brutos mencionados acima foram fornecidos para esta revisão, mas **nã
 
 > Em uma execução integrada com um simulador ROS 1 e um iRobot Create 3 físico via ROS 2, o ROS Translator v2 processou 20 requisições semânticas de navegação (`18 navigate` e `2 follow_waypoints`) por IS-Wire, resultando em 22 objetivos ROS concluídos com sucesso. Cada requisição `follow_waypoints` continha dois objetivos, executados na ordem observada pelo Core, com estados terminais e resposta final correlacionados. As 52 requisições de todos os tipos realizadas pelo cliente foram associadas a eventos de entrada e resposta no Core. O docking físico final foi abortado pelo backend ROS 2, e o erro foi propagado corretamente ao cliente. Esses resultados sustentam a interoperabilidade funcional e a composição sequencial de tarefas; não constituem avaliação de precisão de navegação ou de desempenho do transporte.
 
+## 7. Extensão do protocolo — E3: comandos heterogêneos (a executar)
+
+Após a sessão analisada, foi adicionada uma etapa experimental complementar para
+demonstrar que **o mesmo canal PrIS/IS-Wire encaminha também operações distintas**,
+sem exigir que ambos os backends recebam a mesma ação de navegação:
+
+| Backend | Comando novo | Mecanismo e resposta esperada |
+| --- | --- | --- |
+| ROS 1 simulado | `get_map` | Serviço `/dynamic_map`, resposta `OccupancyGrid` com dimensões e dados válidos |
+| ROS 2 Create 3 | `get_odometry` | Assinatura do tópico `/create3/odom`, mensagem `Odometry` válida |
+
+E3 pode ser executado isoladamente, sem movimentação física, por meio de
+`python3 create3_physical_e2e.py --distinct-commands-only --seed 2027`.
+Também é executado antes dos movimentos no modo completo `--execute --ros1-mirror`.
+São registradas duas requisições com `robot_id`, `request_id` e
+`correlation_id` independentes, além de um evento resumido no cliente.
+
+**Estado científico desta extensão:** implementação e testes automatizados
+disponíveis; **E3 não foi executado na sessão `20261125T155512Z-c38e81`**.
+Portanto, os resultados de E3 não são incluídos nos totais de 52 requisições
+nem declarados como comprovação empírica neste relatório. Após uma execução,
+o respectivo `summary.json`, `wire_requests.jsonl`, `events.jsonl` e os registros
+do Core deverão ser auditados como nova sessão.
+
 ---
 
 **Veredito para revisão do Prof. Alexandre:** evidências **suficientes para sustentar E1 e E2 como validação funcional da comunicação e da tradução entre dois backends ROS** nesta execução, condicionadas à preservação dos arquivos brutos e do estado do código. A execução física completa **não** deve ser denominada *PASS* em razão do docking abortado. A documentação do Core complementa explicitamente as limitações de observação do cliente.
