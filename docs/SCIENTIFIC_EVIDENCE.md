@@ -202,6 +202,27 @@ simultaneous robot motion at the millisecond level. Preserve all four client
 files plus the Core JSONL for the scientific report. Do not retroactively
 attribute E3 to the earlier 2026-11-25 run, which had sequential goals only.
 
+### Observed E3 result — 2026-11-25 17:05 UTC
+
+The Ubuntu-host run `20261125T170547Z-c28397` reported **5/5 completed
+cycles and 10/10 overlapping client request pairs**, with 20 independent
+navigation requests. Its server-side verifier completed at 17:08:44 UTC:
+
+- `status=PASS`, `criterion=server_side_action_interval_overlap`
+- `pairs_verified=10`, `cycles_verified=5`
+- Minimum Core action interval overlap: **2506.458 ms**, across all ten pairs;
+  maximum: **2521.805 ms**
+- ROS 1 terminal status `3` and ROS 2 terminal status `4` for each pair
+- Ordered target → return → next target transitions validated per backend
+
+The complete `e3_overlap_verification.json` was supplied in the research
+conversation and is summarised in
+[`docs/EXPERIMENT_REPORT_2026-11-25.md`](EXPERIMENT_REPORT_2026-11-25.md).
+The original client/Core JSONL files reside on the Ubuntu VM and have not
+been published with the report. Their preservation is needed for independent
+reproduction of the audit; this is **functional evidence from one E3 run**,
+not a statistical reliability or performance benchmark.
+
 ## Quick checks
 
 If `jq` is installed:
