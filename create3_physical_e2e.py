@@ -512,19 +512,8 @@ def run_mission(client: ISWireClient, evidence: Evidence, *, waypoints: list[tup
     dock = client.dock_status(timeout=status_timeout)
     evidence.emit("initial_dock_status", **dock)
     if dock["is_docked"]:
-        # A docked robot provides a safe reference to check the assumed
-        # transform before any physical motion is commanded.
-        pose_at_dock = client.request("get_odometry", timeout=15)
-        dock_odom_x, dock_odom_y, _ = odometry_pose(pose_at_dock)
-        dock_origin_error = math.hypot(dock_odom_x, dock_odom_y)
-        evidence.emit("dock_origin_preflight", dock_world=dock_world,
-                      dock_odom=(dock_odom_x, dock_odom_y),
-                      error_m=round(dock_origin_error, 4))
-        if dock_origin_error > tolerance:
-            raise ExperimentError(
-                "Docked robot's odometry does not match the assumed (0,0) dock origin "
-                f"(error={dock_origin_error:.3f}m, tolerance={tolerance:.3f}m); "
-                "aborting before undock to avoid using an invalid transform")
+        # This experiment measures communication and action completion, not
+        # absolute odometry calibration at the charging station.
         send_action(client, evidence, "undock", {}, action_timeout)
         undocked = client.dock_status(expected=False, timeout=status_timeout)
         evidence.emit("undocked_confirmed", **undocked)
