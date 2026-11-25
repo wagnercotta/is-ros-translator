@@ -170,6 +170,88 @@ def test_e3_rejects_same_or_near_targets_without_movement(runner, tmp_path):
     assert ros1.calls == ros2.calls == []
 
 
+def test_e3_generates_five_deterministic_distinct_pairs(runner):
+    a = runner.parallel_waypoint_pairs(2027)
+    b = runner.parallel_waypoint_pairs(2027)
+    assert a == b
+    assert len(a) == 5
+    assert a[0] == ((-0.8, 0.6), (0.8, -0.6))
+    assert all(runner.math.dist(ros1, ros2) >= 0.5 for ros1, ros2 in a)
+    assert len({target for pair in a for target in pair}) >= 6
+
+
+def test_e3_plan_only_prints_all_five_pairs_without_robot_calls(runner, monkeypatch, capsys):
+    def no_client(*args, **kwargs):
+        pytest.fail("E3 plan must not instantiate an IS-Wire client")
+
+    monkeypatch.setattr(runner, "ISWireClient", no_client)
+    assert runner.main(["--plan-parallel-goals", "--seed", "2027"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["mode"].startswith("E3_PLAN_ONLY")
+    assert len(plan["parallel_e3_waypoints"]) == 5
+    assert plan["parallel_e3_waypoints"][1]["return_world_xy_m"] == [0.0, 0.0]
+    assert plan["waypoints"] == []
+    assert plan["final_actions"] == []
+
+
+def test_e3_rejects_an_invalid_later_pair_before_any_navigation(runner, tmp_path):
+    evidence = runner.Evidence(tmp_path / "invalid-cycles")
+    targets = runner.parallel_waypoint_pairs(2027)
+    targets[-1] = ((0.1, 0.1), (0.2, 0.2))
+    with pytest.raises(runner.ExperimentError, match="Invalid E3 loop 5"):
+        runner.run_parallel_distinct_cycles(
+            Client("create_3", "navigate", {}), Client("ros1_sim", "navigate", {}),
+            evidence, target_pairs=targets, dock_world=(1.5, -1.0),
+            yaw=0.0, timeout=120)
+    assert not evidence.motion_attempted
+    assert not evidence.parallel_goals_verified
+
+
+def test_e3_runs_each_distinct_pair_then_both_origins(runner, tmp_path):
+    evidence = runner.Evidence(tmp_path / "five-cycles")
+    order = []
+
+    class NavigateClient:
+        def __init__(self, rid, status):
+            self.robot_id = rid
+            self.status = status
+            self.count = 0
+
+        def request(self, operation, args, *, timeout):
+            assert operation == "navigate"
+            self.count += 1
+            order.append((self.robot_id, args["position"]["x"], args["position"]["y"]))
+            time.sleep(0.01)
+            return {"request_id": f"{self.robot_id}-{self.count}", "result": {
+                "goal_id": f"goal-{self.robot_id}-{self.count}", "status": self.status}}
+
+    ros1 = NavigateClient("ros1_sim", 3)
+    ros2 = NavigateClient("create_3", 4)
+    pairs = runner.parallel_waypoint_pairs(2027)
+    result = runner.run_parallel_distinct_cycles(
+        ros2, ros1, evidence, target_pairs=pairs,
+        dock_world=(1.5, -1.0), yaw=0.0, timeout=120)
+
+    assert ros1.count == ros2.count == 10
+    assert len(order) == 20
+    assert result["parallel_completed_loops"] == 5
+    assert result["parallel_command_pairs"] == 10
+    assert evidence.parallel_goals_verified
+    assert len(result["parallel_distinct_cycles"]) == 5
+    for i, cycle in enumerate(result["parallel_distinct_cycles"]):
+        assert cycle["loop"] == i + 1
+        assert cycle["target"]["ros1"]["target_world"] == list(pairs[i][0])
+        assert cycle["target"]["ros2"]["target_world"] == list(pairs[i][1])
+        assert cycle["return"]["ros1"]["target_world"] == [0.0, 0.0]
+        assert cycle["return"]["ros2"]["target_world"] == [0.0, 0.0]
+        assert cycle["target"]["client_rpc_overlap_ms"] > 0
+        assert cycle["return"]["client_rpc_overlap_ms"] > 0
+    events = [json.loads(row) for row in evidence.log.read_text().splitlines()]
+    assert len([x for x in events if x["kind"] == "parallel_pair_verified"]) == 10
+    assert len([x for x in events if x["kind"] == "parallel_loop_pass"]) == 5
+    assert len([x for x in events if x["kind"] == "parallel_cycles_verified"]) == 1
+
+
 def test_e3_physical_mode_requires_explicit_supervision(runner):
     with pytest.raises(SystemExit) as exc:
         runner.main(["--parallel-goals-only", "--broker-uri", "amqp://unused"])
@@ -196,11 +278,12 @@ def test_e3_only_mode_does_not_redock_after_parallel_goals(runner, monkeypatch, 
         calls.append("parallel")
         assert client.robot_id == "create_3"
         assert ros1_client.robot_id == "ros1_sim"
+        assert len(kwargs["target_pairs"]) == 5
         evidence.parallel_goals_verified = True
-        return {"parallel_distinct_goals": {"client_rpc_overlap_ms": 12.3}}
+        return {"parallel_distinct_cycles": [], "parallel_completed_loops": 5}
 
     monkeypatch.setattr(runner, "ISWireClient", StubClient)
-    monkeypatch.setattr(runner, "run_parallel_distinct_goals", issue_parallel)
+    monkeypatch.setattr(runner, "run_parallel_distinct_cycles", issue_parallel)
     result = runner.main(["--parallel-goals-only", "--confirm-area-clear",
                           "--broker-uri", "amqp://unused", "--output-root", str(tmp_path)])
     assert result == 0
@@ -232,18 +315,20 @@ def test_full_e3_runs_after_five_loops_and_before_docking(runner, monkeypatch, t
 
     def parallel(*args, **kwargs):
         observed.append("parallel")
-        return {"parallel_distinct_goals": {"client_rpc_overlap_ms": 12.3}}
+        assert len(kwargs["target_pairs"]) == 5
+        return {"parallel_distinct_cycles": [], "parallel_completed_loops": 5}
 
     def dock(*args, **kwargs):
         observed.append("dock")
         return {"is_docked": True}
 
     monkeypatch.setattr(runner, "move", move)
-    monkeypatch.setattr(runner, "run_parallel_distinct_goals", parallel)
+    monkeypatch.setattr(runner, "run_parallel_distinct_cycles", parallel)
     monkeypatch.setattr(runner, "approach_and_dock", dock)
     runner.run_mission(StubClient(), evidence, waypoints=[(0.0, 0.0)] * 5,
                        dock_world=(1.5, -1.0), action_timeout=180,
                        status_timeout=30, tolerance=0.25,
                        dock_approach_distance=0.2,
-                       ros1_client=object(), parallel_targets=((-0.8, 0.6), (0.8, -0.6)))
+                       ros1_client=object(),
+                       parallel_target_pairs=runner.parallel_waypoint_pairs(2027))
     assert observed == ["navigate"] * 10 + ["parallel", "dock"]

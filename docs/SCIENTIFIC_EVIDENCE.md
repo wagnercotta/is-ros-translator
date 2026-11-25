@@ -107,31 +107,52 @@ It saves separate `request_id`/`correlation_id` records and reports
 ## E3: concurrent different navigation destinations in ROS 1 and ROS 2
 
 E1/E2 demonstrate a *shared* semantic contract using corresponding goals,
-normally executed sequentially across the backends. E3 demonstrates **two
-distinct goals sent concurrently** using that same contract, routed to two
-different robots without serialising the dispatch at the client.
+normally executed sequentially across the backends. E3 repeats the familiar
+**destination → origin** workflow for **five complete loops**, but gives
+ROS 1 and ROS 2 **different destinations** and dispatches each pair of
+commands concurrently. The next phase only begins after both preceding
+responses have completed.
 
-| Backend | PrIS operation | World/floor target (m) | ROS action frame and sent coordinates (m) |
+Each E3 loop follows this order:
+
+1. ROS 1 goes to its own target **concurrently** with ROS 2 going to a
+   different target.
+2. Both reach a successful terminal action result.
+3. ROS 1 goes to `map=(0,0)` **concurrently** with ROS 2 going to the
+   corresponding floor origin, `odom=(-1.5,+1.0)`.
+4. Both return actions finish before the next loop is dispatched.
+
+This produces **ten synchronized pairs, 20 independent `navigate` requests**
+and five origin returns on each backend. No positioning-accuracy requirement
+is added to E3: an action's successful ROS status confirms the communication
+path, not the achieved physical pose.
+
+| Backend | PrIS operation | Loop 1 world/floor target (m) | ROS action frame and sent coordinates (m) |
 | --- | --- | --- | --- |
 | ROS 1 simulator (`ros1_sim`) | `navigate` | **(-0.8, +0.6)** | `map`: **(-0.8, +0.6)** via `/move_base` |
 | ROS 2 physical Create 3 (`create_3`) | `navigate` | **(+0.8, -0.6)** | `odom`: **(-0.7, +0.4)** via `/create3/navigate_to_position` |
 
 The ROS 2 odom coordinates result from the **configured** dock offset
-`(1.5, -1.0)` m, not from any claim about navigation accuracy. Custom targets
-are accepted via `--parallel-ros1-x`, `--parallel-ros1-y`,
-`--parallel-ros2-x` and `--parallel-ros2-y`, provided
-they are separated by at least 0.5 m within the configured floor bounds.
+`(1.5, -1.0)` m, not from any claim about navigation accuracy. The first
+destinations are the default targets above, and loops 2–5 use deterministic
+but distinct random destinations derived from `--seed`. Only the first pair
+can be customised via `--parallel-ros1-x`, `--parallel-ros1-y`,
+`--parallel-ros2-x` and `--parallel-ros2-y`. Every destination pair is
+separated by at least 0.5 m within the configured floor bounds.
 
 On the **Ubuntu host, outside Docker**, with Core/ROSBridge already running,
 the IS-Wire broker URI configured, a physically clear area and a supervisor
 holding a reliable **physical** stop control:
 
 ```bash
-# E3 in isolation, with actual Create 3 movement (undocks first if necessary).
+# Preview all five target/return pairs first (no IS-Wire, no motion).
+python3 create3_physical_e2e.py --plan-parallel-goals --seed 2027
+
+# Five E3 loops in isolation; actual Create 3 movement (undocks if necessary).
 python3 create3_physical_e2e.py \
   --parallel-goals-only --confirm-area-clear --seed 2027
 
-# Or E3 after E1/E2 in the complete five-loop protocol, before docking.
+# Or five E3 loops after the five E1/E2 loops, before docking.
 python3 create3_physical_e2e.py \
   --execute --confirm-area-clear --ros1-mirror \
   --validate-follow-waypoints --validate-parallel-goals --seed 2027
@@ -142,11 +163,14 @@ commands unattended; Create 3 NavigateToPosition does not provide obstacle
 avoidance. The simulator and physical robot do not need to be collocated.
 E3 tests *routing/dispatch*, not geometry or trajectory accuracy.
 
-The client uses two worker threads and a start barrier, and each worker
-creates a separate IS-Wire request/channel. Its `events.jsonl` has
-`parallel_request_started`, `parallel_request_completed`, and
-`parallel_distinct_goals_verified`, with independent IDs and monotonic
-start/end times. `summary.json` distinguishes `E3_concurrent_dispatch=PASS`
+The client uses two worker threads and a start barrier for **each pair**, and
+each worker creates a separate IS-Wire request/channel. Its `events.jsonl`
+records `parallel_loop_started`, `parallel_request_started`,
+`parallel_request_completed`, `parallel_pair_verified`, `parallel_loop_pass`
+and `parallel_cycles_verified`, with independent IDs and monotonic start/end
+times. `summary.json` includes `parallel_e3_waypoints` and
+`parallel_distinct_cycles` (per loop: `target`, then `return`). It distinguishes
+`E3_concurrent_dispatch=PASS` only after all ten pairs finish successfully
 from `E3_backend_action_overlap=NOT_VERIFIED_FROM_CLIENT_ALONE`. **Concurrent
 client RPCs alone do not establish simultaneous ROS actions.**
 
@@ -159,17 +183,20 @@ python3 verify_e3_overlap.py \
 ```
 
 Replace `<RUN_ID>` and `<SESSION_ID>` with actual directories displayed by
-the scripts and Compose evidence mount. The verifier matches the two client
-`request_id`/`correlation_id` values, distinct targets and successful replies
-to `iswire.request_received`, `navigation_goal_prepared`,
+the scripts and Compose evidence mount. Verify that the Core evidence file
+is **writable by the current Core UID** before the experiment. The verifier
+checks **all 20** client `request_id`/`correlation_id` pairs, destination/return
+coordinates and successful replies against `iswire.request_received`, `navigation_goal_prepared`,
 `bridge.action_dispatched`, and each adapter's `goal_sent`/`goal_terminal`.
 Using the **same Core monotonic clock**, it computes:
 
 `overlap = min(goal_terminal_ros1, goal_terminal_ros2) - max(goal_sent_ros1, goal_sent_ros2)`
 
-Only a **strictly positive** interval with both successful backend terminal
-statuses produces `[PASS]` and a saved `e3_overlap_verification.json`. A zero
-or negative interval, incomplete logs or an ID mismatch produces `[FAIL]`.
+Only a **strictly positive** interval in **every one of the ten pairs**, with
+both successful backend terminal statuses and the phases in order, produces
+`[PASS]` and a saved `e3_overlap_verification.json`. A zero/negative interval,
+missing return, overlapping successive phases, incomplete logs or ID mismatch
+produces `[FAIL]`.
 This is evidence of overlapping ROS action-client intervals, not necessarily
 simultaneous robot motion at the millisecond level. Preserve all four client
 files plus the Core JSONL for the scientific report. Do not retroactively

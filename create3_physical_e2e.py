@@ -12,6 +12,7 @@ This client never starts the gateway, Docker, ROSBridge, or a ROS 2 node.
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror --validate-follow-waypoints
   python3 create3_physical_e2e.py --distinct-commands-only
+  python3 create3_physical_e2e.py --plan-parallel-goals --seed 2027
   python3 create3_physical_e2e.py --parallel-goals-only --confirm-area-clear
   python3 create3_physical_e2e.py --execute --confirm-area-clear --ros1-mirror --validate-parallel-goals
 
@@ -29,9 +30,11 @@ The ROS 1 mirror also validates distinct read-only PrIS operations before
 physical movement: ROS 1 get_map (service) and ROS 2 get_odometry (topic).
 Use --distinct-commands-only to run that stage without robot motion.
 With --validate-parallel-goals, after the five loops ROS 1 and ROS 2 each
-receive a *different* navigate target through independent IS-Wire requests,
-dispatched concurrently from two synchronised worker threads. The independent
---parallel-goals-only mode moves the Create 3 and does not dock it afterwards.
+receive *different* navigate targets in five additional cycles. Each cycle
+dispatches independent IS-Wire requests from synchronised worker threads:
+ROS1_target + ROS2_target (concurrently), then ROS1_origin + ROS2_origin
+(concurrently). The independent --parallel-goals-only mode runs just these
+five cycles, moves the Create 3 and does not dock it afterwards.
 
 IMPORTANT: Create 3 NavigateToPosition is NOT an obstacle-avoiding planner.
 An operator must supervise the robot and keep a physical stop available.
@@ -104,6 +107,37 @@ def random_waypoints(seed: int) -> list[tuple[float, float]]:
     rng = random.Random(seed)
     return [(round(rng.uniform(-COORD_LIMIT, COORD_LIMIT), 3),
              round(rng.uniform(-COORD_LIMIT, COORD_LIMIT), 3)) for _ in range(LOOPS)]
+
+
+def parallel_waypoint_pairs(seed: int, *,
+                            first_ros1: tuple[float, float] = DEFAULT_PARALLEL_ROS1_WORLD,
+                            first_ros2: tuple[float, float] = DEFAULT_PARALLEL_ROS2_WORLD
+                            ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Five deterministic pairs; each outbound leg has different ROS1/ROS2 goals.
+
+    The first pair is configurable for the lab. Subsequent pairs follow the
+    seeded physical E2E square; no post-action position precision is measured.
+    """
+    def valid(point):
+        return all(math.isfinite(v) and abs(v) <= COORD_LIMIT for v in point)
+
+    if (not valid(first_ros1) or not valid(first_ros2)
+            or math.dist(first_ros1, first_ros2) < 0.5):
+        raise ExperimentError("E3 outbound destinations must be >=0.5m apart "
+                              "and within +/-1.2m on each axis")
+    ros1_points = random_waypoints(seed)
+    ros2_rng = random.Random(seed ^ 0xE32027)
+    pairs = [(first_ros1, first_ros2)]
+    for ros1_point in ros1_points[1:]:
+        for _ in range(100):
+            ros2_point = (round(ros2_rng.uniform(-COORD_LIMIT, COORD_LIMIT), 3),
+                          round(ros2_rng.uniform(-COORD_LIMIT, COORD_LIMIT), 3))
+            if math.dist(ros1_point, ros2_point) >= 0.5:
+                pairs.append((ros1_point, ros2_point))
+                break
+        else:
+            raise ExperimentError("E3 could not generate separated destinations")
+    return pairs
 
 
 def world_to_odom(world: tuple[float, float],
@@ -389,6 +423,12 @@ class Evidence:
                 "parallel_distinct_goals_verified":
                     "[PASS] E3 concurrent navigation | different ROS1/ROS2 targets "
                     f"| client RPC overlap={values.get('rpc_overlap_ms')}ms",
+                "parallel_pair_verified":
+                    f"[PASS] E3 loop {values.get('loop')}/{LOOPS} "
+                    f"{values.get('phase')} | RPC overlap={values.get('rpc_overlap_ms')}ms",
+                "parallel_cycles_verified":
+                    f"[PASS] E3 {values.get('loops')}/{LOOPS} cycles "
+                    "| distinct destinations -> origins",
                 "dock_approach_verified": "[PASS] Dock approach verified",
                 "docked_confirmed": "[PASS] Create3 docked (telemetry confirmed)",
                 "docking_warning": f"[WARN] {values.get('detail')}",
@@ -526,8 +566,10 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
                                 ros1_world: tuple[float, float],
                                 ros2_world: tuple[float, float],
                                 dock_world: tuple[float, float],
-                                yaw: float, timeout: float) -> dict:
-    """E3: dispatch different navigation goals concurrently to ROS1 and ROS2.
+                                yaw: float, timeout: float,
+                                loop_index: int | None = None,
+                                phase: str = "target") -> dict:
+    """E3: dispatch two navigation requests concurrently to ROS1 and ROS2.
 
     Two independent IS-Wire channels are created by the respective client
     request calls. The barrier synchronises *client dispatch*, not robot
@@ -536,11 +578,17 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
     """
     if ros1_client is None or client.robot_id == ros1_client.robot_id:
         raise ExperimentError("E3 requires distinct ROS1 and ROS2 robot IDs")
-    if (not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
-                for v in (*ros1_world, *ros2_world))
-            or math.dist(ros1_world, ros2_world) < 0.5):
-        raise ExperimentError("E3 requires distinct targets at least 0.5m apart "
-                              "within the physical +/-1.2m test area")
+    if not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
+               for v in (*ros1_world, *ros2_world)):
+        raise ExperimentError("E3 destinations must be within the physical +/-1.2m test area")
+    if phase == "target":
+        if math.dist(ros1_world, ros2_world) < 0.5:
+            raise ExperimentError("E3 requires distinct targets at least 0.5m apart")
+    elif phase == "return":
+        if ros1_world != WORLD_ORIGIN or ros2_world != WORLD_ORIGIN:
+            raise ExperimentError("E3 return phase requires origin (0,0) for both robots")
+    else:
+        raise ExperimentError(f"Unsupported E3 phase: {phase}")
 
     ros2_odom = world_to_odom(ros2_world, dock_world)
     ros1_args = {"position": {"x": ros1_world[0], "y": ros1_world[1], "z": 0.0},
@@ -550,7 +598,8 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
     evidence.emit("parallel_distinct_goals_started", ros1_robot_id=ros1_client.robot_id,
                   ros2_robot_id=client.robot_id, ros1_target_world=ros1_world,
                   ros2_target_world=ros2_world, ros2_target_odom=ros2_odom,
-                  operation="navigate", independent_requests=True)
+                  operation="navigate", independent_requests=True,
+                  loop=loop_index, phase=phase)
 
     barrier = threading.Barrier(3)
 
@@ -563,7 +612,7 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
         evidence.emit("parallel_request_started", robot_id=target_client.robot_id,
                       operation="navigate", rpc_start_monotonic_ns=started,
                       target_world=target_world, target_backend=args["position"],
-                      frame_id=args["frame_id"])
+                      frame_id=args["frame_id"], loop=loop_index, phase=phase)
         try:
             response = send_action(target_client, evidence, "navigate", args, timeout,
                                    expected_status=expected_status,
@@ -571,7 +620,8 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
         except BaseException as exc:
             evidence.emit("parallel_request_failed", robot_id=target_client.robot_id,
                           rpc_end_monotonic_ns=time.monotonic_ns(),
-                          error=f"{type(exc).__name__}: {exc}")
+                          error=f"{type(exc).__name__}: {exc}",
+                          loop=loop_index, phase=phase)
             raise
         ended = time.monotonic_ns()
         goal_id = response["result"].get("goal_id")
@@ -579,7 +629,8 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
                       operation="navigate", rpc_start_monotonic_ns=started,
                       rpc_end_monotonic_ns=ended,
                       request_id=response["request_id"], goal_id=goal_id,
-                      terminal_status=response["result"]["status"])
+                      terminal_status=response["result"]["status"],
+                      loop=loop_index, phase=phase)
         return {"robot_id": target_client.robot_id, "request_id": response["request_id"],
                 "goal_id": goal_id, "terminal_status": response["result"]["status"],
                 "rpc_start_monotonic_ns": started, "rpc_end_monotonic_ns": ended,
@@ -607,17 +658,67 @@ def run_parallel_distinct_goals(client: ISWireClient, ros1_client: ISWireClient,
     if overlap_ns <= 0:
         raise ExperimentError("E3 client IS-Wire requests did not overlap")
 
-    evidence.parallel_goals_verified = True
     overlap_ms = round(overlap_ns / 1_000_000, 3)
-    evidence.emit("parallel_distinct_goals_verified",
+    if loop_index is None:
+        # Retain direct single-pair API compatibility; the E3 cycle runner
+        # only marks success after all ten pairs have finished.
+        evidence.parallel_goals_verified = True
+    evidence.emit("parallel_distinct_goals_verified" if loop_index is None
+                  else "parallel_pair_verified",
                   ros1_request_id=ros1_result["request_id"],
                   ros2_request_id=ros2_result["request_id"],
                   rpc_overlap_ms=overlap_ms,
-                  server_action_overlap="NOT_VERIFIED_FROM_CLIENT_ALONE")
+                  server_action_overlap="NOT_VERIFIED_FROM_CLIENT_ALONE",
+                  loop=loop_index, phase=phase)
     return {"parallel_distinct_goals": {"ros1": ros1_result, "ros2": ros2_result,
                                         "client_rpc_overlap_ms": overlap_ms,
                                         "server_action_overlap":
                                             "NOT_VERIFIED_FROM_CLIENT_ALONE"}}
+
+
+def run_parallel_distinct_cycles(client: ISWireClient, ros1_client: ISWireClient,
+                                 evidence: Evidence, *,
+                                 target_pairs: list[tuple[tuple[float, float],
+                                                          tuple[float, float]]],
+                                 dock_world: tuple[float, float],
+                                 yaw: float, timeout: float) -> dict:
+    """Run five E3 cycles: different targets concurrently, then both origins.
+
+    Complete both action replies before dispatching the next phase. Keep
+    partial results if an action fails, and do not mark E3 PASS prematurely.
+    """
+    if len(target_pairs) != LOOPS:
+        raise ExperimentError(f"E3 requires exactly {LOOPS} distinct destination pairs")
+    for index, (ros1_world, ros2_world) in enumerate(target_pairs, 1):
+        if (not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
+                    for v in (*ros1_world, *ros2_world))
+                or math.dist(ros1_world, ros2_world) < 0.5):
+            raise ExperimentError(f"Invalid E3 loop {index} destinations; "
+                                  "all five pairs must be safe before any movement")
+    cycles = []
+    evidence.parallel_results = {"parallel_distinct_cycles": cycles,
+                                 "parallel_completed_loops": 0}
+    for index, (ros1_world, ros2_world) in enumerate(target_pairs, 1):
+        cycle = {"loop": index, "ros1_target_world": [*ros1_world],
+                 "ros2_target_world": [*ros2_world]}
+        cycles.append(cycle)
+        evidence.emit("parallel_loop_started", loop=index,
+                      ros1_target_world=ros1_world, ros2_target_world=ros2_world)
+        cycle["target"] = run_parallel_distinct_goals(
+            client, ros1_client, evidence, ros1_world=ros1_world,
+            ros2_world=ros2_world, dock_world=dock_world, yaw=yaw,
+            timeout=timeout, loop_index=index, phase="target")["parallel_distinct_goals"]
+        cycle["return"] = run_parallel_distinct_goals(
+            client, ros1_client, evidence, ros1_world=WORLD_ORIGIN,
+            ros2_world=WORLD_ORIGIN, dock_world=dock_world, yaw=yaw,
+            timeout=timeout, loop_index=index, phase="return")["parallel_distinct_goals"]
+        evidence.parallel_results["parallel_completed_loops"] = index
+        evidence.emit("parallel_loop_pass", loop=index)
+    evidence.parallel_goals_verified = True
+    evidence.parallel_results["parallel_command_pairs"] = 2 * LOOPS
+    evidence.emit("parallel_cycles_verified", loops=LOOPS,
+                  independent_navigate_requests=4 * LOOPS)
+    return evidence.parallel_results
 
 
 def send_action(client: ISWireClient, evidence: Evidence, action: str,
@@ -704,7 +805,8 @@ def run_mission(client: ISWireClient, evidence: Evidence, *, waypoints: list[tup
                 tolerance: float, dock_approach_distance: float,
                 ros1_client: ISWireClient | None = None,
                 validate_follow_waypoints: bool = False,
-                parallel_targets: tuple[tuple[float, float], tuple[float, float]] | None = None) -> dict:
+                parallel_target_pairs: list[tuple[tuple[float, float],
+                                                   tuple[float, float]]] | None = None) -> dict:
     # The dock approach is a separate final operation, never a sixth random
     # waypoint; every loop also returns to the world origin by design.
     if len(waypoints) != LOOPS:
@@ -752,11 +854,10 @@ def run_mission(client: ISWireClient, evidence: Evidence, *, waypoints: list[tup
                  ros1_client=ros1_client)
         evidence.emit("loop_pass", index=index)
 
-    if parallel_targets is not None:
-        evidence.parallel_results = run_parallel_distinct_goals(
-            client, ros1_client, evidence, ros1_world=parallel_targets[0],
-            ros2_world=parallel_targets[1], dock_world=dock_world,
-            yaw=yaw, timeout=action_timeout)
+    if parallel_target_pairs is not None:
+        evidence.parallel_results = run_parallel_distinct_cycles(
+            client, ros1_client, evidence, target_pairs=parallel_target_pairs,
+            dock_world=dock_world, yaw=yaw, timeout=action_timeout)
 
     state = approach_and_dock(client, evidence, dock_world=dock_world, yaw=yaw,
                               action_timeout=action_timeout, status_timeout=status_timeout,
@@ -858,7 +959,9 @@ def argument_parser() -> argparse.ArgumentParser:
     run.add_argument("--distinct-commands-only", action="store_true",
                      help="Run only H1 diagnostic: ROS1 get_map and ROS2 get_odometry, without motion")
     run.add_argument("--parallel-goals-only", action="store_true",
-                     help="Run E3 only: concurrent distinct navigation goals in ROS1 and ROS2; moves Create3")
+                     help="Run five E3 loops: distinct concurrent ROS1/ROS2 targets then both origins; moves Create3")
+    run.add_argument("--plan-parallel-goals", action="store_true",
+                     help="Print the five E3 destination/return pairs without any robot communication")
     parser.add_argument("--confirm-area-clear", action="store_true",
                         help="Confirm a supervised, obstacle-free 2.4m x 2.4m area "
                              "plus robot clearance, dock, and travel paths")
@@ -871,11 +974,13 @@ def argument_parser() -> argparse.ArgumentParser:
                         help="In loop 5, replace its two navigate calls with ONE 2-goal "
                              "follow_waypoints request per backend; requires --execute --ros1-mirror")
     parser.add_argument("--validate-parallel-goals", action="store_true",
-                        help="After five loops, dispatch distinct ROS1/ROS2 navigate goals concurrently; "
+                        help="After five mirror loops, run five E3 cycles with different concurrent goals and returns; "
                              "requires --execute --ros1-mirror")
-    parser.add_argument("--parallel-ros1-x", type=float, default=DEFAULT_PARALLEL_ROS1_WORLD[0])
+    parser.add_argument("--parallel-ros1-x", type=float, default=DEFAULT_PARALLEL_ROS1_WORLD[0],
+                        help="ROS1 destination X of E3 loop 1; remaining loops seeded")
     parser.add_argument("--parallel-ros1-y", type=float, default=DEFAULT_PARALLEL_ROS1_WORLD[1])
-    parser.add_argument("--parallel-ros2-x", type=float, default=DEFAULT_PARALLEL_ROS2_WORLD[0])
+    parser.add_argument("--parallel-ros2-x", type=float, default=DEFAULT_PARALLEL_ROS2_WORLD[0],
+                        help="ROS2 destination X of E3 loop 1; remaining loops seeded")
     parser.add_argument("--parallel-ros2-y", type=float, default=DEFAULT_PARALLEL_ROS2_WORLD[1])
     parser.add_argument("--verbose", action="store_true",
                         help="Show every event on the terminal; detailed evidence is always saved")
@@ -930,12 +1035,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--validate-parallel-goals requires --execute --ros1-mirror")
     ros1_parallel = (args.parallel_ros1_x, args.parallel_ros1_y)
     ros2_parallel = (args.parallel_ros2_x, args.parallel_ros2_y)
-    if (not all(math.isfinite(v) and abs(v) <= COORD_LIMIT
-                for v in (*ros1_parallel, *ros2_parallel))
-            or math.dist(ros1_parallel, ros2_parallel) < 0.5):
-        parser.error("Parallel destinations must be >=0.5m apart, inside +/-1.2m on each axis")
 
     seed = args.seed if args.seed is not None else secrets.randbits(31)
+    try:
+        parallel_pairs = parallel_waypoint_pairs(
+            seed, first_ros1=ros1_parallel, first_ros2=ros2_parallel)
+    except ExperimentError as exc:
+        parser.error(str(exc))
     points_world = random_waypoints(seed)
     if len(points_world) != LOOPS:
         parser.error(f"random_waypoints must return exactly {LOOPS} points; "
@@ -945,8 +1051,8 @@ def main(argv: list[str] | None = None) -> int:
     approach_world = odom_to_world(approach_odom, dock_world)
     read_only = args.distinct_commands_only
     parallel_only = args.parallel_goals_only
-    parallel_enabled = args.validate_parallel_goals or parallel_only
-    plan = {"seed": seed, "loops": 0 if args.dock_only or read_only or parallel_only else LOOPS,
+    parallel_enabled = args.validate_parallel_goals or parallel_only or args.plan_parallel_goals
+    plan = {"seed": seed, "loops": 0 if args.dock_only or read_only else LOOPS,
             "coordinate_frame": "physical_floor",
             "world_bounds_m": [-COORD_LIMIT, COORD_LIMIT],
             "dock_world_xy_m": [*dock_world],
@@ -964,19 +1070,33 @@ def main(argv: list[str] | None = None) -> int:
             "parallel_ros1_world_xy_m": [*ros1_parallel] if parallel_enabled else None,
             "parallel_ros2_world_xy_m": [*ros2_parallel] if parallel_enabled else None,
             "parallel_ros2_odom_xy_m": [*world_to_odom(ros2_parallel, dock_world)] if parallel_enabled else None,
-            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror or read_only or parallel_only else None,
-            "ros1_navigation_frame": "map" if args.ros1_mirror or parallel_only else None,
+            "parallel_e3_waypoints": [
+                {"loop": i, "ros1_target_world_xy_m": [*r1],
+                 "ros2_target_world_xy_m": [*r2],
+                 "ros2_target_odom_xy_m": [*world_to_odom(r2, dock_world)],
+                 "return_world_xy_m": [*WORLD_ORIGIN],
+                 "return_odom_xy_m": [*return_odom]}
+                for i, (r1, r2) in enumerate(parallel_pairs, 1)
+            ] if parallel_enabled else [],
+            "ros1_robot_id": args.ros1_robot_id if args.ros1_mirror or read_only or parallel_enabled else None,
+            "ros1_navigation_frame": "map" if args.ros1_mirror or parallel_enabled else None,
             "waypoints": [
                 {"loop": i, "random_world_xy_m": [*point],
                  "random_odom_xy_m": [*world_to_odom(point, dock_world)],
                  "return_world_xy_m": [*WORLD_ORIGIN],
                  "return_odom_xy_m": [*return_odom]}
                 for i, point in enumerate(points_world, 1)]
-                if not args.dock_only and not read_only and not parallel_only else [],
-            "final_actions": [] if read_only or parallel_only else ["navigate_to_dock_approach", "dock"],
+                if not args.dock_only and not read_only and not parallel_only
+                and not args.plan_parallel_goals else [],
+            "final_actions": [] if read_only or parallel_only or args.plan_parallel_goals
+                             else ["navigate_to_dock_approach", "dock"],
             "robot_id": args.robot_id}
-    if not args.execute and not args.check_only and not args.dock_only and not read_only and not parallel_only:
-        print(json.dumps({"mode": "DRY_RUN (NO robot communication)", **plan}, indent=2))
+    if (args.plan_parallel_goals or
+            (not args.execute and not args.check_only and not args.dock_only
+             and not read_only and not parallel_only)):
+        print(json.dumps({"mode": "E3_PLAN_ONLY (NO robot communication)"
+                          if args.plan_parallel_goals else "DRY_RUN (NO robot communication)",
+                          **plan}, indent=2))
         return 0
     if not args.broker_uri:
         parser.error("ISWIRE_BROKER_URI (or --broker-uri) is required")
@@ -1014,10 +1134,9 @@ def main(argv: list[str] | None = None) -> int:
                 evidence.emit("undocked_confirmed",
                               **client.dock_status(expected=False, timeout=args.status_timeout))
             _, _, yaw = odometry_pose(client.request("get_odometry", timeout=15))
-            evidence.parallel_results = run_parallel_distinct_goals(
-                client, ros1_client, evidence, ros1_world=ros1_parallel,
-                ros2_world=ros2_parallel, dock_world=dock_world,
-                yaw=yaw, timeout=args.action_timeout)
+            evidence.parallel_results = run_parallel_distinct_cycles(
+                client, ros1_client, evidence, target_pairs=parallel_pairs,
+                dock_world=dock_world, yaw=yaw, timeout=args.action_timeout)
             summary.update(evidence.parallel_results)
         elif args.dock_only:
             evidence.emit("physical_supervision_confirmed", acknowledged=True)
@@ -1038,7 +1157,7 @@ def main(argv: list[str] | None = None) -> int:
                                        dock_approach_distance=args.dock_approach_distance,
                                        ros1_client=ros1_client,
                                        validate_follow_waypoints=args.validate_follow_waypoints,
-                                       parallel_targets=(ros1_parallel, ros2_parallel)
+                                       parallel_target_pairs=parallel_pairs
                                        if args.validate_parallel_goals else None))
         summary["status"] = "passed"
         evidence.emit("experiment_pass", mode=summary["mode"])

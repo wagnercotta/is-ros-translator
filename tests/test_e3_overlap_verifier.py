@@ -66,6 +66,61 @@ def fixture_evidence(tmp_path, *, ros1_end=200, ros2_start=150, ros2_end=300):
     return run, core
 
 
+def fixture_five_cycles(tmp_path):
+    run, core = fixture_evidence(tmp_path)
+    base_summary = json.loads((run / "summary.json").read_text())
+    original = base_summary.pop("parallel_distinct_goals")
+    client_rows = [json.loads(row) for row in (run / "wire_requests.jsonl").read_text().splitlines()]
+    core_rows = [json.loads(row) for row in core.read_text().splitlines()]
+    new_client, new_core, cycles = [], [], []
+    for i in range(1, 6):
+        cycle = {"loop": i}
+        for phase_index, phase in enumerate(("target", "return")):
+            pair = {"client_rpc_overlap_ms": 50.0}
+            offset = ((i - 1) * 2 + phase_index) * 400_000_000
+            for version, old_id in (("ros1", "req1"), ("ros2", "req2")):
+                new_id = f"{old_id}-{i}-{phase}"
+                old_item = original[version]
+                item = {**old_item, "request_id": new_id,
+                        "goal_id": f"{old_item['goal_id']}-{i}-{phase}",
+                        "target_world": [0.0, 0.0] if phase == "return"
+                                        else old_item["target_world"]}
+                pair[version] = item
+                client_row = json.loads(json.dumps(next(
+                    row for row in client_rows if row["request"]["request_id"] == old_id)))
+                client_row["request"]["request_id"] = new_id
+                client_row["reply"]["request_id"] = new_id
+                client_row["correlation_id"] = new_id
+                if phase == "return":
+                    coords = (0.0, 0.0) if version == "ros1" else (-1.5, 1.0)
+                    client_row["request"]["args"]["position"].update(
+                        {"x": coords[0], "y": coords[1]})
+                new_client.append(client_row)
+                for original_row in core_rows:
+                    if original_row["request_id"] != old_id:
+                        continue
+                    server_row = json.loads(json.dumps(original_row))
+                    server_row["request_id"] = new_id
+                    if "monotonic_ns" in server_row:
+                        server_row["monotonic_ns"] += offset
+                    if "goal_id" in server_row:
+                        server_row["goal_id"] = item["goal_id"]
+                    if "correlation_id" in server_row:
+                        server_row["correlation_id"] = new_id
+                    if "navigation_args" in server_row:
+                        server_row["navigation_args"] = client_row["request"]["args"]
+                    new_core.append(server_row)
+            cycle[phase] = pair
+        cycles.append(cycle)
+    base_summary["parallel_distinct_cycles"] = cycles
+    base_summary["parallel_completed_loops"] = 5
+    (run / "summary.json").write_text(json.dumps(base_summary))
+    (run / "wire_requests.jsonl").write_text("".join(
+        json.dumps(row) + "\n" for row in new_client))
+    core.write_text("".join(json.dumps(row) + "\n" for row in new_core))
+    return run, core
+
+
 def test_e3_corroborates_overlapping_backend_intervals(checker, tmp_path):
     run, core = fixture_evidence(tmp_path)
     result = checker.verify(run, core)
@@ -88,4 +143,32 @@ def test_e3_rejects_missing_adapter_proof(checker, tmp_path):
                and row["event"] == "goal_sent")]
     core.write_text("".join(json.dumps(row) + "\n" for row in rows))
     with pytest.raises(checker.VerificationError, match="expected one ros1_adapter.goal_sent"):
+        checker.verify(run, core)
+
+
+def test_e3_five_cycles_verify_all_ten_concurrent_pairs(checker, tmp_path):
+    run, core = fixture_five_cycles(tmp_path)
+    result = checker.verify(run, core)
+    assert result["status"] == "PASS"
+    assert result["pairs_verified"] == 10
+    assert result["cycles_verified"] == 5
+    assert [x["phase"] for x in result["pairs"]] == ["target", "return"] * 5
+    assert all(pair["core_overlap_ms"] > 0 for pair in result["pairs"])
+
+
+def test_e3_five_cycles_rejects_missing_return_leg(checker, tmp_path):
+    run, core = fixture_five_cycles(tmp_path)
+    summary = json.loads((run / "summary.json").read_text())
+    del summary["parallel_distinct_cycles"][3]["return"]
+    (run / "summary.json").write_text(json.dumps(summary))
+    with pytest.raises(checker.VerificationError, match="loop 4 has no return pair"):
+        checker.verify(run, core)
+
+
+def test_e3_five_cycles_rejects_wrong_return_coordinates(checker, tmp_path):
+    run, core = fixture_five_cycles(tmp_path)
+    summary = json.loads((run / "summary.json").read_text())
+    summary["parallel_distinct_cycles"][1]["return"]["ros2"]["target_world"] = [0.2, 0.0]
+    (run / "summary.json").write_text(json.dumps(summary))
+    with pytest.raises(checker.VerificationError, match="loop 2 did not return"):
         checker.verify(run, core)

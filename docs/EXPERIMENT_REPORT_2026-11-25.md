@@ -191,45 +191,69 @@ Os dados brutos mencionados acima foram fornecidos para esta revisão, mas **nã
 
 ## 7. Extensão do protocolo — E3: destinos diferentes em execução concorrente (a executar)
 
-O ensaio E3 foi incorporado **após** a sessão de 15:55 UTC para examinar uma
-capacidade ainda não observada em E1/E2: **duas requisições `navigate`
-independentes, simultaneamente encaminhadas a ROS 1 e ROS 2, com destinos
-intencionalmente distintos**.
+O protocolo E3 foi ampliado **após** a sessão de 15:55 UTC para examinar uma
+capacidade ainda não observada em E1/E2: **sequências independentes de
+navegação concorrente em ROS 1 e ROS 2, com destinos intencionalmente
+distintos**, intercaladas com retornos à origem.
+
+São **cinco ciclos**, cada um com duas fases executadas em ordem:
+
+1. ROS 1 recebe um destino próprio e ROS 2 um destino diferente, por duas
+   requisições `navigate` emitidas simultaneamente.
+2. Após ambas as ações terminarem, os dois backends recebem, também
+   simultaneamente, uma navegação de retorno ao ponto físico `(0,0)`.
+3. A próxima rodada começa apenas quando ambos os retornos terminam.
+
+Isso totaliza **20 requisições de navegação**, dez para cada backend, em
+**dez pares concorrentes** (cinco destinos e cinco retornos). Os destinos
+dos ciclos 2–5 são gerados de forma determinística por `--seed 2027`,
+mantendo distância mínima de 0,5 m entre os dois alvos de cada ciclo.
 
 | Propriedade | ROS 1 (`ros1_sim`) | ROS 2 (`create_3`) |
 | --- | --- | --- |
-| Destino no referencial físico (m) | **(-0.8, +0.6)** | **(+0.8, -0.6)** |
+| Destino inicial, ciclo 1, referencial físico (m) | **(-0.8, +0.6)** | **(+0.8, -0.6)** |
 | Referencial da ação | `map` | `odom` |
-| Posição efetivamente solicitada (m) | **(-0.8, +0.6)** | **(-0.7, +0.4)**, após a transformação nominal do cliente |
+| Posição inicial solicitada (m) | **(-0.8, +0.6)** | **(-0.7, +0.4)**, após a transformação nominal do cliente |
+| Retorno a cada ciclo (m) | `map=(0,0)` | `odom=(-1.5,+1.0)` |
 | Executor | Simulador ROS 1 `/move_base` | Create 3 físico, ação ROS 2 `/create3/navigate_to_position` |
 
-Duas threads do cliente, sincronizadas por barreira, enviam chamadas IS-Wire
-`navigate` separadas. Cada uma gera `robot_id`, `request_id`, `correlation_id`,
-`goal_id` e horário de envio/conclusão identificáveis. O objetivo de E3 é
+Duas threads do cliente, sincronizadas por barreira **em cada fase**, enviam
+chamadas IS-Wire `navigate` separadas. Cada uma gera `robot_id`, `request_id`,
+`correlation_id`, `goal_id` e horário de envio/conclusão identificáveis.
+O objetivo de E3 é
 avaliar **concorrência e independência de roteamento**, não proximidade entre
 trajetórias, exatidão de pose ou coordenação física entre robôs.
 
 Executar no host Ubuntu, sob supervisão e com área livre:
 
 ```bash
+# Inspecionar os cinco pares de destinos/retornos, sem movimentação:
+python3 create3_physical_e2e.py --plan-parallel-goals --seed 2027
+
+# Executar os cinco ciclos em hardware:
 python3 create3_physical_e2e.py \
   --parallel-goals-only --confirm-area-clear --seed 2027
 ```
 
-Esse modo movimenta o Create 3, podendo desacoplar da base, e **não realiza
-docking automático**. Como alternativa, o protocolo completo aceita
+Esse modo realiza cinco ciclos adicionais de movimentação do Create 3,
+podendo desacoplar da base, e **não realiza docking automático**. Como
+alternativa, o protocolo completo aceita
 `--execute --confirm-area-clear --ros1-mirror --validate-follow-waypoints
 --validate-parallel-goals --seed 2027` para incluir E3 após os cinco ciclos e
-antes da tentativa final de docking.
+antes da tentativa final de docking. O destino físico e a geometria das
+trajetórias não são usados como critério de precisão; verificam-se os
+comandos, os encaminhamentos e seus estados terminais.
 
-**Critério de validação:** o cliente registra horários monotônicos de duas
-requisições sobrepostas, mas isso **não basta** para sustentar que as duas ações
+**Critério de validação:** o cliente registra horários monotônicos de cada par
+de requisições sobrepostas, mas isso **não basta** para sustentar que as ações
 ROS ocorreram em paralelo. O verificador adicional `verify_e3_overlap.py`
-cruza `wire_requests.jsonl` com `core_bridge_events.jsonl`, exige ambos os
-estados terminais de sucesso e calcula a interseção temporal dos intervalos
+cruza os **20 IDs** de `wire_requests.jsonl` com `core_bridge_events.jsonl`,
+exige todos os estados terminais de sucesso, os retornos na ordem correta e
+calcula a interseção temporal dos intervalos
 `goal_sent` → `goal_terminal` dos adaptadores ROS 1 e ROS 2, usando o relógio
-monotônico do Core. Somente uma interseção positiva e registros completos
-produzem um `e3_overlap_verification.json` com `status=PASS`.
+monotônico do Core. Somente uma interseção positiva **em cada um dos dez
+pares**, com registros completos, produz um `e3_overlap_verification.json`
+com `status=PASS`.
 
 Uma etapa diagnóstica auxiliar **H1**, já implementada, testa operações de
 tipos diferentes sem movimento (`get_map` no ROS 1 e `get_odometry` no ROS 2):
@@ -244,10 +268,15 @@ completo quando `--ros1-mirror` está ativo.
 
 **Estado científico:** E3 e H1 não integraram a execução original
 `20261125T155512Z-c38e81`, cujas contagens e conclusões nas seções anteriores
-permanecem inalteradas. Implementação e testes locais não constituem
-comprovação empírica em hardware. Uma nova sessão, com os arquivos brutos do
-cliente e Core e o verificador E3, deverá ser anexada ao relatório antes de
-declarar a simultaneidade observada.
+permanecem inalteradas. Uma versão preliminar de E3 com **apenas um par** foi
+executada às 16:53 UTC (`20261125T165346Z-b77da1`), com sucesso nas duas
+respostas do cliente e 2.638,172 ms de sobreposição de requisições. A
+auditoria do Core para esse par permaneceu **inconclusiva**, pois o arquivo de
+evidências indicado não continha os novos eventos, com indício de problema
+de permissões de escrita. Essa sessão preliminar **não comprova
+simultaneidade das ações ROS** e não valida a nova sequência de cinco ciclos.
+Uma execução completa da nova versão, com os arquivos brutos de cliente e
+Core e verificação E3, ainda é necessária.
 
 ---
 
