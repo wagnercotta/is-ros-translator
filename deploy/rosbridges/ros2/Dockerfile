@@ -11,6 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/*
 
+# Installed Jazzy ROSAPI versions may call a non-existent Node method during
+# /rosapi/action_type, crashing rosapi_node and breaking all later discovery.
+# Patch only that upstream compatibility issue; fail the build if the installed
+# package has an unknown layout. Modern/fixed packages are left unchanged.
+COPY deploy/rosbridges/ros2/patch_rosapi_action_type.py /tmp/patch_rosapi_action_type.py
+RUN python3 /tmp/patch_rosapi_action_type.py "/opt/ros/${ROS_DISTRO}" \
+    && rm /tmp/patch_rosapi_action_type.py
+
 # A build-time IPv4 is injected into the Fast DDS peer configuration.
 # The physical lab fails fast if LAB_PI_WIFI_IP is missing; generic builds
 # can omit PI_WIFI_IP when they do not use a Fast DDS profile.
