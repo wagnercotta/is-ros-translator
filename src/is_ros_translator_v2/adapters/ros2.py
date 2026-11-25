@@ -13,6 +13,38 @@ from .base import pose_stamped
 
 LOG = logging.getLogger(__name__)
 
+# action_msgs/msg/GoalStatus: 4 is SUCCEEDED; 5 and 6 are CANCELED/ABORTED.
+_ROS2_GOAL_STATUSES = {
+    "UNKNOWN": 0,
+    "ACCEPTED": 1,
+    "EXECUTING": 2,
+    "CANCELING": 3,
+    "SUCCEEDED": 4,
+    "CANCELED": 5,
+    "ABORTED": 6,
+}
+
+
+def _normalise_goal_status(value: object) -> int | None:
+    """Accept numeric ROS 2 statuses and roslibpy's textual enum representation."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value in _ROS2_GOAL_STATUSES.values() else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and int(value) in _ROS2_GOAL_STATUSES.values() else None
+    if isinstance(value, str):
+        name = value.strip()
+        if name.startswith("GoalStatus."):
+            name = name[len("GoalStatus."):]
+        if name.startswith("STATUS_"):
+            name = name[len("STATUS_"):]
+        if name in _ROS2_GOAL_STATUSES:
+            return _ROS2_GOAL_STATUSES[name]
+        if name in ("0", "1", "2", "3", "4", "5", "6"):
+            return int(name)
+    return None
+
 
 class ROS2Adapter:
     def __init__(self, robot: RobotConfig):
@@ -75,11 +107,21 @@ class ROS2Adapter:
         if "error" in outcome:
             raise GatewayError(outcome["error"], "action_failed", 502)
         result = outcome["result"]
-        status = result.get("status") if isinstance(result, Mapping) else None
+        raw_status = result.get("status") if isinstance(result, Mapping) else None
+        status = _normalise_goal_status(raw_status)
         if status is None:
-            raise GatewayError(f"ROS 2 action {name} returned no terminal status", "action_failed", 502)
+            raise GatewayError(
+                f"ROS 2 action {name} returned an invalid terminal status: {raw_status!r}",
+                "action_failed",
+                502,
+            )
         if status != 4:
-            raise GatewayError(f"ROS 2 action {name} finished with status {status}", "action_failed", 502)
-        if isinstance(result, Mapping) and result.get("result") is False:
+            raise GatewayError(f"ROS 2 action {name} finished with status {raw_status}", "action_failed", 502)
+        if result.get("result") is False:
             raise GatewayError(f"ROS 2 action {name} reported failure", "action_failed", 502)
-        return {"goal_id": str(goal_id), "result": result, "status": status}
+        # Keep the original representation for diagnostics, but use the ROS 2
+        # numeric code in *both* fields consumed by downstream IS-Wire clients.
+        normalised_result = dict(result)
+        normalised_result["raw_status"] = raw_status
+        normalised_result["status"] = status
+        return {"goal_id": str(goal_id), "result": normalised_result, "status": status}

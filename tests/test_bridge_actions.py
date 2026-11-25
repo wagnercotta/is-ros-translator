@@ -86,3 +86,48 @@ def test_ros1_action_result(monkeypatch):
     result = RosBridge._ros1_action(object(), "/move_base", "move_base_msgs/MoveBaseAction", {}, 2, None)
     assert result["status"] == 3
     assert result["result"]["done"]
+
+
+@pytest.mark.parametrize(
+    "raw_status",
+    [4, 4.0, "4", "GoalStatus.SUCCEEDED", "GoalStatus.STATUS_SUCCEEDED", "STATUS_SUCCEEDED", "SUCCEEDED"],
+)
+def test_ros2_action_normalises_succeeded_status(monkeypatch, raw_status):
+    install_stub(monkeypatch)
+
+    class StatusActionClient(DummyRos2ActionClient):
+        def send_goal(self, goal, resultback, feedback, errback):
+            resultback({"status": raw_status, "result": {"error_code": 0}})
+            return "goal-1"
+
+    monkeypatch.setattr(sys.modules["roslibpy"], "ActionClient", StatusActionClient)
+    reply = RosBridge._ros2_action(
+        object(), "/create3/undock", "irobot_create_msgs/action/Undock",
+        {}, timeout=2, feedback=None,
+    )
+    assert reply["status"] == 4
+    assert reply["result"]["status"] == 4
+    assert reply["result"]["raw_status"] == raw_status
+
+
+@pytest.mark.parametrize(
+    "raw_status",
+    [
+        0, 1, 2, 3, 5, 6, True, None, "GoalStatus.CANCELED",
+        "GoalStatus.ABORTED", "GoalStatus.UNKNOWN", "invalid", "Foo.SUCCEEDED",
+    ],
+)
+def test_ros2_action_rejects_non_success_status(monkeypatch, raw_status):
+    install_stub(monkeypatch)
+
+    class StatusActionClient(DummyRos2ActionClient):
+        def send_goal(self, goal, resultback, feedback, errback):
+            resultback({"status": raw_status, "result": {"error_code": 0}})
+            return "goal-1"
+
+    monkeypatch.setattr(sys.modules["roslibpy"], "ActionClient", StatusActionClient)
+    with pytest.raises(GatewayError):
+        RosBridge._ros2_action(
+            object(), "/create3/undock", "irobot_create_msgs/action/Undock",
+            {}, timeout=2, feedback=None,
+        )
