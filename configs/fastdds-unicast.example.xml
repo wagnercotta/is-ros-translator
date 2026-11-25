@@ -6,7 +6,15 @@
         <metatrafficUnicastLocatorList>
           <locator/>
         </metatrafficUnicastLocatorList>
+        <!-- Discover ROS 2 nodes on this host (rosapi, rosbridge, CLI) as well
+             as the remote Raspberry Pi/Create3. Without the loopback peer,
+             local nodes can remain invisible even when their processes run. -->
         <initialPeersList>
+          <locator>
+            <udpv4>
+              <address>127.0.0.1</address>
+            </udpv4>
+          </locator>
           <locator>
             <udpv4>
               <address>PI_WIFI_IP</address>
