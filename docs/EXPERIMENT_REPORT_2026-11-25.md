@@ -1,7 +1,6 @@
 # Relatório técnico-científico: interoperabilidade ROS 1/ROS 2 via ROS Translator v2
 
 **Data da execução:** 25 de novembro de 2026 (UTC)  
-**Destinatário:** Prof. Alexandre — revisão do artigo IE 2027  
 **Projeto:** IS-ROS-Translator / LabVISIO  
 **Identificadores das execuções:** E1/E2 `20261125T155512Z-c38e81`; E3 `20261125T170547Z-c28397`  
 **Resultado:** **E1 e E2 aprovados na primeira sessão (docking físico abortado); E3 aprovado na segunda sessão, com dez pares concorrentes confirmados no Core.**
