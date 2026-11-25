@@ -1,0 +1,13 @@
+# Do not send docs, absent licence placeholders, or local state to Docker.
+README.md
+LICENSE
+NOTICE.md
+.git
+.gitignore
+**/__pycache__/
+**/.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/

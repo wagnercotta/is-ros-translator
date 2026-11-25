@@ -23,6 +23,7 @@ services:
       dockerfile: deploy/rosbridges/ros2/Dockerfile
       args:
         ROS_DISTRO: jazzy
+        PI_WIFI_IP: ${LAB_PI_WIFI_IP:?Set LAB_PI_WIFI_IP to the Raspberry Pi IPv4 in deploy/lab/.env}
     container_name: rostranslator-bridge-jazzy
     network_mode: host
     restart: unless-stopped
@@ -32,8 +33,6 @@ services:
       FASTRTPS_DEFAULT_PROFILES_FILE: /etc/fastdds/unicast.xml
       ROSBRIDGE_PORT: "9090"
       ROSBRIDGE_BIND_ADDRESS: "127.0.0.1"
-    volumes:
-      - ../../configs/fastdds-unicast.xml:/etc/fastdds/unicast.xml:ro
 
   core:
     build:
