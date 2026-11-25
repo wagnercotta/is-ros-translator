@@ -1,0 +1,61 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 32; 35; 42
+    Frame Rate: 30
+  Displays:
+    - Class: rviz/Grid
+      Enabled: true
+      Name: Floor grid
+      Cell Size: 1
+      Plane Cell Count: 14
+      Color: 140; 140; 140
+      Alpha: 0.35
+    - Class: rviz/Map
+      Enabled: true
+      Name: Simulated free space
+      Topic: /map
+      Alpha: 0.25
+      Color Scheme: map
+    - Class: rviz/Odometry
+      Enabled: true
+      Name: Mirrored ROS1 odometry
+      Topic: /odom
+      Keep: 30
+      Shape: Arrow
+    - Class: rviz/Path
+      Enabled: true
+      Name: Mirrored path
+      Topic: /ros1_sim/path
+      Color: 255; 174; 32
+      Line Style: Lines
+      Line Width: 0.05
+    - Class: rviz/Marker
+      Enabled: true
+      Name: Current goal
+      Marker Topic: /ros1_sim/goal_marker
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 9
+      Focal Point:
+        X: 0.0
+        Y: 0.0
+        Z: 0.0
+      Pitch: 1.0
+      Yaw: 0.8
+      Target Frame: map
+Window Geometry:
+  Height: 900
+  Width: 1600

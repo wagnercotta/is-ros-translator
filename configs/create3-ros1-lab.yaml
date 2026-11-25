@@ -1,0 +1,72 @@
+# Combined physical Create 3 + simulated ROS 1 lab.
+# The Core is unchanged: it only dispatches requests by robot_id/bridge_id.
+# Enable with LAB_CORE_CONFIG=../../configs/create3-ros1-lab.yaml and the ros1 Compose profile.
+http:
+  enabled: true
+  host: 127.0.0.1
+  port: 8080
+iswire:
+  enabled: true
+  url_env: ISWIRE_BROKER_URI
+  request_topic: ROSTranslator.v2.Request
+  robot_task_topic: ROSTranslator.v2.RobotTask
+security:
+  require_api_key: true
+  api_key_env: GATEWAY_API_KEY
+  allow_live_schema_fallback: false
+default_timeout_seconds: 180
+bridges:
+  jazzy_local:
+    ros_version: 2
+    distribution: jazzy
+    host: 127.0.0.1
+    port: 9090
+    domain_id: 0
+    rmw_implementation: rmw_fastrtps_cpp
+  noetic_local:
+    ros_version: 1
+    distribution: noetic
+    host: 127.0.0.1
+    port: 9091
+robots:
+  create_3:
+    ros_version: 2
+    bridge_id: jazzy_local
+    navigation:
+      action: /create3/navigate_to_position
+      action_type: irobot_create_msgs/action/NavigateToPosition
+      frame_id: odom
+    map_service: null
+    odom_topic: /create3/odom
+    allowed:
+      subscribe: [/create3/odom, /create3/battery_state, /create3/dock_status]
+      actions: [/create3/navigate_to_position, /create3/dock, /create3/undock, /create3/drive_distance]
+    capabilities:
+      dock:
+        operation: ros.action
+        endpoint: /create3/dock
+        ros_type: irobot_create_msgs/action/Dock
+        allow_overrides: false
+      undock:
+        operation: ros.action
+        endpoint: /create3/undock
+        ros_type: irobot_create_msgs/action/Undock
+        allow_overrides: false
+      drive_distance:
+        operation: ros.action
+        endpoint: /create3/drive_distance
+        ros_type: irobot_create_msgs/action/DriveDistance
+        default_payload: {distance: 0.25, max_translation_speed: 0.1}
+  ros1_sim:
+    ros_version: 1
+    bridge_id: noetic_local
+    navigation:
+      action: /move_base
+      action_type: move_base_msgs/MoveBaseAction
+      frame_id: map
+    map_service: /dynamic_map
+    odom_topic: /odom
+    allowed:
+      subscribe: [/odom, /ros1_sim/path, /ros1_sim/goal_marker]
+      actions: [/move_base]
+      services: [/dynamic_map]

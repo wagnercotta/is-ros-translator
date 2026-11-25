@@ -1,5 +1,7 @@
-# Run from the repository root:
+# Run from repository root:
 # docker compose --env-file deploy/lab/.env -f deploy/lab/compose.yaml up -d --build
+# For optional ROS1 mirror: add LAB_CORE_CONFIG=../../configs/create3-ros1-lab.yaml
+# to deploy/lab/.env and start with --profile ros1.
 services:
   rabbitmq:
     image: rabbitmq:3.13-management
@@ -34,6 +36,21 @@ services:
       ROSBRIDGE_PORT: "9090"
       ROSBRIDGE_BIND_ADDRESS: "127.0.0.1"
 
+  ros1-lab:
+    profiles: [ros1]
+    build:
+      context: ../..
+      dockerfile: deploy/lab/ros1/Dockerfile
+    container_name: rostranslator-ros1-lab
+    network_mode: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/opt/ros1-lab/health.sh"]
+      start_period: 45s
+      interval: 10s
+      timeout: 8s
+      retries: 12
+
   core:
     build:
       context: ../..
@@ -45,7 +62,7 @@ services:
       GATEWAY_API_KEY: ${LAB_API_KEY:?Set LAB_API_KEY}
       ISWIRE_BROKER_URI: amqp://${LAB_RABBITMQ_USER}:${LAB_RABBITMQ_PASSWORD}@127.0.0.1:5672/
     volumes:
-      - ../../configs/create3-lab.yaml:/app/configs/create3-lab.yaml:ro
+      - ${LAB_CORE_CONFIG:-../../configs/create3-lab.yaml}:/app/configs/create3-lab.yaml:ro
     command: ["is-ros-translator", "--config", "/app/configs/create3-lab.yaml"]
     depends_on:
       rabbitmq:
