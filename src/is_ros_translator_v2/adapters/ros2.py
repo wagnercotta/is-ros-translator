@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import Enum
 import logging
 import threading
 
@@ -26,7 +27,13 @@ _ROS2_GOAL_STATUSES = {
 
 
 def _normalise_goal_status(value: object) -> int | None:
-    """Accept numeric ROS 2 statuses and roslibpy's textual enum representation."""
+    """Accept numeric, textual and enum ROS 2 GoalStatus representations."""
+    if isinstance(value, Enum):
+        if type(value).__name__ != "GoalStatus":
+            return None
+        status_name = value.name.removeprefix("STATUS_")
+        expected_code = _ROS2_GOAL_STATUSES.get(status_name)
+        return expected_code if value.value == expected_code else None
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -122,6 +129,6 @@ class ROS2Adapter:
         # Keep the original representation for diagnostics, but use the ROS 2
         # numeric code in *both* fields consumed by downstream IS-Wire clients.
         normalised_result = dict(result)
-        normalised_result["raw_status"] = raw_status
+        normalised_result["raw_status"] = str(raw_status) if isinstance(raw_status, Enum) else raw_status
         normalised_result["status"] = status
         return {"goal_id": str(goal_id), "result": normalised_result, "status": status}

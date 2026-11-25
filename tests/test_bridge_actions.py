@@ -1,9 +1,20 @@
 """Adapter-level unit tests use a roslibpy stub, not a real ROS VM."""
 import sys
 import types
+from enum import Enum
 import pytest
 from is_ros_translator_v2.bridge import RosBridge
 from is_ros_translator_v2.errors import GatewayError
+
+
+class GoalStatus(Enum):
+    SUCCEEDED = 4
+    CANCELED = 5
+    ABORTED = 6
+
+
+class UnrelatedStatus(Enum):
+    SUCCEEDED = 4
 
 
 class DummyRosMessage(dict):
@@ -90,7 +101,7 @@ def test_ros1_action_result(monkeypatch):
 
 @pytest.mark.parametrize(
     "raw_status",
-    [4, 4.0, "4", "GoalStatus.SUCCEEDED", "GoalStatus.STATUS_SUCCEEDED", "STATUS_SUCCEEDED", "SUCCEEDED"],
+    [4, 4.0, "4", "GoalStatus.SUCCEEDED", "GoalStatus.STATUS_SUCCEEDED", "STATUS_SUCCEEDED", "SUCCEEDED", GoalStatus.SUCCEEDED],
 )
 def test_ros2_action_normalises_succeeded_status(monkeypatch, raw_status):
     install_stub(monkeypatch)
@@ -107,7 +118,7 @@ def test_ros2_action_normalises_succeeded_status(monkeypatch, raw_status):
     )
     assert reply["status"] == 4
     assert reply["result"]["status"] == 4
-    assert reply["result"]["raw_status"] == raw_status
+    assert reply["result"]["raw_status"] == (str(raw_status) if isinstance(raw_status, Enum) else raw_status)
 
 
 @pytest.mark.parametrize(
@@ -115,6 +126,7 @@ def test_ros2_action_normalises_succeeded_status(monkeypatch, raw_status):
     [
         0, 1, 2, 3, 5, 6, True, None, "GoalStatus.CANCELED",
         "GoalStatus.ABORTED", "GoalStatus.UNKNOWN", "invalid", "Foo.SUCCEEDED",
+        GoalStatus.CANCELED, GoalStatus.ABORTED, UnrelatedStatus.SUCCEEDED,
     ],
 )
 def test_ros2_action_rejects_non_success_status(monkeypatch, raw_status):
