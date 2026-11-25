@@ -1,7 +1,9 @@
 """Static constraints for the optional ROS 1 mirror of physical Create 3 E2E."""
 
+import importlib.util
 from pathlib import Path
 
+import pytest
 import yaml
 
 from is_ros_translator_v2.config import load_settings
@@ -49,3 +51,40 @@ def test_ros1_visualisation_endpoints_match_simulator():
     displays = rviz["Visualization Manager"]["Displays"]
     topics = {disp.get("Topic") or disp.get("Marker Topic") for disp in displays}
     assert {"/odom", "/ros1_sim/path", "/ros1_sim/goal_marker"} <= topics
+
+
+def test_communication_e2e_does_not_block_undock_on_dock_odom_offset(monkeypatch):
+    """Dock origin precision is not an acceptance criterion for the communication E2E."""
+    spec = importlib.util.spec_from_file_location(
+        "create3_physical_e2e", ROOT / "create3_physical_e2e.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    class Client:
+        def dock_status(self, *, timeout):
+            return {"is_docked": True, "dock_visible": True}
+
+        def request(self, *args, **kwargs):
+            pytest.fail("Initial odometry must not gate the undock command")
+
+    class Evidence:
+        events = []
+
+        def emit(self, event, **details):
+            self.events.append(event)
+
+    class UndockReached(Exception):
+        pass
+
+    def stop_at_undock(client, evidence, action, args, timeout):
+        assert action == "undock"
+        raise UndockReached
+
+    monkeypatch.setattr(runner, "send_action", stop_at_undock)
+    evidence = Evidence()
+    with pytest.raises(UndockReached):
+        runner.run_mission(Client(), evidence, waypoints=[(0.0, 0.0)] * 5,
+                           dock_world=(1.5, -1.0), action_timeout=180,
+                           status_timeout=30, tolerance=0.25,
+                           dock_approach_distance=0.2)
+    assert evidence.events == ["initial_dock_status"]
